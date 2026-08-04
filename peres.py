@@ -1,8 +1,10 @@
 import asyncio
 import logging
-from aiogram import Bot, Dispatcher, F, Router
-from aiogram.filters import Command
-from aiogram.types import Message
+import sqlite3
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # Вставьте ваш токен и ваш Telegram ID (главный админ)
 TOKEN = "8778414676:AAHWdX12JWXv5FjKvGb8F83WziNuXh3ZFuI"
