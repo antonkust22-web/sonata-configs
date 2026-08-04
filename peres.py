@@ -35,7 +35,8 @@ async def cmd_add_admin(message: Message):
 
   new_admin_id = int(args[1])
   admins.add(new_admin_id)
-  await message.answer(f"Пользователь {new теперь администратор.")
+  await message.answer(f"Пользователь `{new_admin_id}` назначен администратором.", parse_mode="Markdown")
+
 
 
 @router.message(Command("bind"))
