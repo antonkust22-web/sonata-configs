@@ -274,6 +274,7 @@ async def faq_menu_callback(callback: types.CallbackQuery):
         "🔸 Ответ: Обычно администраторы отвечают в течение 10-15 минут.\n\n"
         "🔹 Вопрос 2: Можно ли отправлять медиафайлы?\n"
         "🔸 Ответ: Да, вы можете отправлять скриншоты, документы и голосовые сообщения."
+        "\n\n Вопросы и ответы будут обновляться."
     )
     await callback.message.answer(faq_text, parse_mode="Markdown")
     await callback.answer()
@@ -500,91 +501,145 @@ async def cmd_info(message: types.Message):
     await message.answer(admin_text, parse_mode="Markdown")
 
 
+# --- КОМАНДЫ ВЛАДЕЛЬЦА (Управление админами и овнерами) ---
+
 @dp.message(Command("addadmin"))
 async def cmd_add_admin(message: types.Message):
-    if not is_owner(message.from_user.id): 
+    uid = message.from_user.id
+    if not is_owner(uid): 
         return
+        
     args = message.text.split()
+    # Заменили проверку на HTML-безопасную
     if len(args) < 2 or not args[1].isdigit(): 
-        await message.answer("⚠️ Использование: /addadmin <Telegram_ID>", parse_mode="Markdown")
+        await message.answer("⚠️ Использование: <code>/addadmin 123456789</code>", parse_mode="HTML")
         return
-    new_id = int(args[1])
-    add_admin_to_db(new_id)
-    await message.answer(f"✅ Пользователь {new_id} сохранен как Администратор.")
+        
+    target_id = int(args[1])
+    add_admin_to_db(target_id)
+    
+    await message.answer(f"✅ Пользователь <code>{target_id}</code> сохранен как Администратор.", parse_mode="HTML")
+    
+    # УВЕДОМЛЕНИЕ ПОЛЬЗОВАТЕЛЮ
+    try:
+        await bot.send_message(
+            chat_id=target_id,
+            text="🎉 <b>Поздравляем!</b> Вы назначены <b>Администратором</b> в тех. поддержке.\nВведите /panel, чтобы начать работу.",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
 
 
 @dp.message(Command("deladmin"))
 async def cmd_del_admin(message: types.Message):
     if not is_owner(message.from_user.id): 
         return
+        
     args = message.text.split()
+    # Исправили ошибку парсинга (убрали < > и перевели на HTML)
     if len(args) < 2 or not args[1].isdigit(): 
-        await message.answer("⚠️ Использование: /deladmin <Telegram_ID>", parse_mode="Markdown")
+        await message.answer("⚠️ Использование: <code>/deladmin 123456789</code>", parse_mode="HTML")
         return
+        
     target_id = int(args[1])
     if target_id == OWNER_ID:
         await message.answer("⚠️ Нельзя удалить главного владельца.")
         return
+        
     if remove_admin_from_db(target_id):
-        await message.answer(f"❌ Пользователь {target_id} удален из админов.")
+        await message.answer(f"❌ Пользователь <code>{target_id}</code> удален из админов.", parse_mode="HTML")
+        
+        # УВЕДОМЛЕНИЕ ПОЛЬЗОВАТЕЛЮ
+        try:
+            await bot.send_message(
+                chat_id=target_id,
+                text="❌ Вы были <b>удалены</b> из списка администраторов тех. поддержки.",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
     else:
         await message.answer("⚠️ Данный ID не найден в списке администраторов.")
-
 
 
 @dp.message(Command("addowner"))
 async def cmd_add_owner(message: types.Message):
     uid = message.from_user.id
-    # Строжайшая проверка: команду может выполнять ТОЛЬКО создатель бота (OWNER_ID)
     if uid != OWNER_ID:
         return
         
     args = message.text.split()
     if len(args) < 2 or not args[1].isdigit():
-        await message.answer("⚠️ Использование: /addowner <Telegram_ID>", parse_mode="Markdown")
+        await message.answer("⚠️ Использование: <code>/addowner 123456789</code>", parse_mode="HTML")
         return
         
     new_owner_id = int(args[1])
     add_owner_to_db(new_owner_id)
     
     success_text = (
-        f"👑 **Новый Главный админ назначен!**\n"
+        f"👑 <b>Новый Главный админ назначен!</b>\n"
+        f"<pre>"
         f"ID: {new_owner_id}\n"
-        f"Статус: Активирован на всех ботах\n"
-        f"Пользователю теперь доступны просмотр статистики и управление обычными админами."
+        f"Статус: Активирован\n"
+        f"</pre>\n"
+        f"Пользователю доступны функции просмотра статистики и управления админами."
     )
-    await message.answer(success_text, parse_mode="Markdown")
+    await message.answer(success_text, parse_mode="HTML")
+    
+    # УВЕДОМЛЕНИЕ ПОЛЬЗОВАТЕЛЮ
+    try:
+        await bot.send_message(
+            chat_id=new_owner_id,
+            text="👑 Вы назначены <b>Главным администратором</b> (Owner).\nВам доступны функции управления персоналом и просмотра статистики.",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
 
 
 @dp.message(Command("delowner"))
 async def cmd_del_owner(message: types.Message):
     uid = message.from_user.id
-    # Команду может выполнять ТОЛЬКО создатель бота (OWNER_ID)
     if uid != OWNER_ID:
         return
         
     args = message.text.split()
     if len(args) < 2 or not args[1].isdigit():
-        await message.answer("⚠️ Использование: /delowner <Telegram_ID>", parse_mode="Markdown")
+        await message.answer("⚠️ Использование: <code>/delowner 123456789</code>", parse_mode="HTML")
         return
         
     target_id = int(args[1])
-    
-    # Защита: нельзя снять права Главного админа с самого себя (с создателя)
     if target_id == OWNER_ID:
-        await message.answer("⚠️ Вы не можете снять роль Главного админа с самого себя (Создателя бота).")
+        await message.answer("⚠️ Вы не можете снять роль Главного админа с самого себя.")
         return
         
     if demote_owner_in_db(target_id):
         demote_text = (
-            f"❌ **Полномочия отозваны!**\n"
+            f"❌ <b>Полномочия отозваны!</b>\n"
+            f"<pre>"
             f"ID: {target_id}\n"
-            f"Статус: Понижен до обычного админа\n"
-            f"Пользователь больше не может смотреть статистику и управлять другими админами."
+            f"Статус: Понижен\n"
+            f"</pre>\n"
+            f"Пользователь переведен в ранг обычного администратора."
         )
-        await message.answer(demote_text, parse_mode="Markdown")
+        await message.answer(demote_text, parse_mode="HTML")
+        
+        # УВЕДОМЛЕНИЕ ПОЛЬЗОВАТЕЛЮ
+        try:
+            await bot.send_message(
+                chat_id=target_id,
+                text="⚠️ Ваши полномочия Главного администратора отозваны. Вы переведены в ранг <b>обычного администратора</b>.",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
     else:
         await message.answer("⚠️ Пользователь с таким ID не найден в списке Главных администраторов.")
+
+
+
+
 
 
 
