@@ -188,6 +188,29 @@ def get_admin_by_target_user(user_id: int) -> int | None:
         cursor.execute("SELECT admin_id FROM admin_sessions WHERE target_user_id = ?", (user_id,))
         result = cursor.fetchone()
         return result[0] if result else None
+        
+
+def add_owner_to_db(user_id: int):
+    """Назначает пользователя Главным админом (owner)"""
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        # Если пользователь уже был обычным админом, REPLACE обновит его роль до 'owner'
+        cursor.execute("""
+            INSERT OR REPLACE INTO admins (user_id, role) 
+            VALUES (?, 'owner')
+        """, (user_id,))
+        conn.commit()
+
+def demote_owner_in_db(user_id: int) -> bool:
+    """Понижает Главного админа до обычного админа. Возвращает True, если успешно."""
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        # Меняем роль обратно на 'admin'
+        cursor.execute("UPDATE admins SET role = 'admin' WHERE user_id = ? AND role = 'owner'", (user_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
 
 
 # --- КЛАВИАТУРЫ ---
@@ -224,7 +247,7 @@ def get_admin_panel_kb(user_id: int):
 async def cmd_start(message: types.Message):
     uid = message.from_user.id
     if is_admin(uid):
-        await message.answer("👋 Приветствуем в панели администратора! Используйте команду `/panel` для просмотра очереди.", parse_mode="Markdown")
+        await message.answer("👋 Приветствуем в панели администратора! Используйте команду /panel для просмотра очереди.", parse_mode="Markdown")
     else:
         await message.answer(
             f"👋 Здравствуйте, {message.from_user.first_name}!\n"
@@ -265,7 +288,7 @@ async def cmd_panel(message: types.Message):
         # Красивое оформление шпаргалки для админа в виде блока
         info_text = (
             "📂 **Список активных диалогов**\n"
-            "📋<b> ШПАРАЛКА ПО УПРАВЛЕНИЮ ЧАТОМ:</b>\n"
+            "📋 ШПАРАЛКА ПО УПРАВЛЕНИЮ ЧАТОМ:\n"
             "• /leave - Временно выйти из чата\n"
             "• /close - Полностью закрыть тикет\n"
             "• /info  - Посмотреть все команды\n"
@@ -323,12 +346,56 @@ async def open_chat(callback: types.CallbackQuery):
     await callback.message.answer(chat_info, parse_mode="Markdown")
     
     try:
-        await bot.send_message(chat_id=user_id, text="⚡️ Администратор подключился к диалогу. Напишите ваш вопрос.")
+        await bot.send_message(chat_id=user_id, text="⚡️ Администратор подключился к диалогу. Скоро последует ответ.")
     except Exception:
         pass
     await callback.answer()
 
 # --- СТАТИСТИКА И УПРАВЛЕНИЕ АДМИНАМИ (ДЛЯ ОВНЕРА / ГЛАВНОГО) ---
+
+
+
+@dp.callback_query(F.data == "manage_admins")
+async def manage_admins_callback(callback: types.CallbackQuery):
+    """Обработка кнопки '👑 Управление админами' (только для Главного админа)"""
+    uid = callback.from_user.id
+    
+    # Проверяем роль пользователя в БД
+    if not is_owner(uid):
+        await callback.answer("⚠️ У вас нет прав Главного администратора.", show_alert=True)
+        return
+        
+    try:
+        admins = get_all_admins()
+        
+        # Переводим оформление на красивый HTML с фоном <pre>
+        if not admins:
+            text = (
+                "👑 <b>Управление администраторами</b>\n\n"
+                "<i>Обычных админов пока нет.</i>\n\n"
+            )
+        else:
+            text = "👑 <b>Действующие администраторы:</b>\n<pre>"
+            for i, adm_id in enumerate(admins, 1):
+                text += f"{i}. ID: {adm_id}\n"
+            text += "</pre>\n"
+            
+        text += (
+            "💡 Чтобы <b>добавить</b> админа, напиши:\n<code>/addadmin ID</code>\n\n"
+            "💡 Чтобы <b>удалить</b> админа, напиши:\n<code>/deladmin ID</code>"
+        )
+        
+        # Отправляем новое сообщение, чтобы админка открылась корректно
+        await callback.message.answer(text, parse_mode="HTML")
+        await callback.answer() # Закрываем часы загрузки на кнопке
+        
+    except Exception as e:
+        logging.error(f"Ошибка в manage_admins: {e}")
+        await callback.answer("❌ Произошла ошибка при получении списка админов.", show_alert=True)
+
+
+
+
 
 @dp.callback_query(F.data == "view_stats")
 async def view_stats_callback(callback: types.CallbackQuery):
@@ -402,7 +469,7 @@ async def cmd_leave(message: types.Message):
     
     leave_info = (
         "⏱ **Вы вышли из чата**\n"
-        "Диалог снова доступен в <code>/panel</code> для всех админов."
+        "Диалог снова доступен в /panel для всех админов."
     )
     await message.answer(leave_info, parse_mode="Markdown")
     
@@ -420,9 +487,9 @@ async def cmd_info(message: types.Message):
 
     admin_text = (
         "🛠 **Панель управления администратора:**\n"
-        "• <code>/panel</code> — Открыть список активных диалогов.\n"
-        "• <code>/leave</code> — Выйти из текущего диалога (оставив открытым).\n"
-        "• <code>/close</code> — Полностью закрыть обращение.\n"
+        "• /panel — Открыть список активных диалогов.\n"
+        "• /leave — Выйти из текущего диалога (оставив открытым).\n"
+        "• /close — Полностью закрыть обращение.\n"
     )
     if is_owner(uid):
         admin_text += (
@@ -464,6 +531,66 @@ async def cmd_del_admin(message: types.Message):
         await message.answer("⚠️ Данный ID не найден в списке администраторов.")
 
 
+
+@dp.message(Command("addowner"))
+async def cmd_add_owner(message: types.Message):
+    uid = message.from_user.id
+    # Строжайшая проверка: команду может выполнять ТОЛЬКО создатель бота (OWNER_ID)
+    if uid != OWNER_ID:
+        return
+        
+    args = message.text.split()
+    if len(args) < 2 or not args[1].isdigit():
+        await message.answer("⚠️ Использование: /addowner <Telegram_ID>", parse_mode="Markdown")
+        return
+        
+    new_owner_id = int(args[1])
+    add_owner_to_db(new_owner_id)
+    
+    success_text = (
+        f"👑 **Новый Главный админ назначен!**\n"
+        f"ID: {new_owner_id}\n"
+        f"Статус: Активирован на всех ботах\n"
+        f"Пользователю теперь доступны просмотр статистики и управление обычными админами."
+    )
+    await message.answer(success_text, parse_mode="Markdown")
+
+
+@dp.message(Command("delowner"))
+async def cmd_del_owner(message: types.Message):
+    uid = message.from_user.id
+    # Команду может выполнять ТОЛЬКО создатель бота (OWNER_ID)
+    if uid != OWNER_ID:
+        return
+        
+    args = message.text.split()
+    if len(args) < 2 or not args[1].isdigit():
+        await message.answer("⚠️ Использование: /delowner <Telegram_ID>", parse_mode="Markdown")
+        return
+        
+    target_id = int(args[1])
+    
+    # Защита: нельзя снять права Главного админа с самого себя (с создателя)
+    if target_id == OWNER_ID:
+        await message.answer("⚠️ Вы не можете снять роль Главного админа с самого себя (Создателя бота).")
+        return
+        
+    if demote_owner_in_db(target_id):
+        demote_text = (
+            f"❌ **Полномочия отозваны!**\n"
+            f"ID: {target_id}\n"
+            f"Статус: Понижен до обычного админа\n"
+            f"Пользователь больше не может смотреть статистику и управлять другими админами."
+        )
+        await message.answer(demote_text, parse_mode="Markdown")
+    else:
+        await message.answer("⚠️ Пользователь с таким ID не найден в списке Главных администраторов.")
+
+
+
+
+
+
 # --- ЕДИНЫЙ ОБРАБОТЧИК ДЛЯ ВСЕХ ТИПОВ СООБЩЕНИЙ И МЕДИА ---
 
 @dp.message()
@@ -479,7 +606,7 @@ async def handle_all_messages(message: types.Message):
             return
             
         if not target_user_id:
-            await message.answer("Вы не вошли в чат. Используйте `/panel`, чтобы выбрать пользователя.")
+            await message.answer("Вы не вошли в чат. Используйте /panel, чтобы выбрать пользователя.")
             return
             
         try:
@@ -524,7 +651,7 @@ async def handle_all_messages(message: types.Message):
         f"```\n"
         f"📝 **Сообщение:**\n"
         f"_{text_preview}_\n\n"
-        f"👉 Откройте <code>/panel</code> для ответа."
+        f"👉 Откройте /panel для ответа."
     )
 
     try:
