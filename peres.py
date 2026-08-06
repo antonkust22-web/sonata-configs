@@ -863,8 +863,8 @@ async def admin_profile_callback(callback: types.CallbackQuery):
     
     # Красиво переводим системное название роли на понятный язык
     role_titles = {
-        'owner': '👑 Создатель / Главный владелец',
-        'admin': '🛠 Обычный администратор поддержки'
+        'owner': '👑 Главный Администратор',
+        'admin': '🛠 Администратор'
     }
     display_role = role_titles.get(role, '🔒 Сотрудник')
     
@@ -917,7 +917,7 @@ async def back_to_panel_callback(callback: types.CallbackQuery):
         "• /leave - Временно выйти из чата\n"
         "• /close - Полностью закрыть тикет\n"
         "</pre>\n"
-        "<i>Выберите active диалог из списка ниже для начала общения:</i>"
+        "<i>Выберите активный диалог из списка ниже для начала общения:</i>"
     )
     
     try:
