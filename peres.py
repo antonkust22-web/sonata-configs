@@ -9,6 +9,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
 import os
 os.makedirs("chat_logs", exist_ok=True)
 
@@ -420,10 +422,16 @@ async def refresh_panel(callback: types.CallbackQuery):
     if not is_admin(uid):
         return
     try:
-        await callback.message.edit_markup(reply_markup=get_admin_panel_kb(uid))
+        # ИСПРАВЛЕНО: Вместо edit_markup используем правильный метод edit_reply_markup
+        await callback.message.edit_reply_markup(reply_markup=get_admin_panel_kb(uid))
         await callback.answer("Список обновлен!")
     except TelegramBadRequest:
+        # Эта ошибка вылетает, если список тикетов не изменился (кнопки остались теми же)
         await callback.answer("Новых диалогов нет.", show_alert=False)
+    except Exception as e:
+        logging.error(f"Ошибка при обновлении панели: {e}")
+        await callback.answer("❌ Не удалось обновить список.")
+
 
 
 @dp.callback_query(F.data.startswith("chat_"))
@@ -673,7 +681,7 @@ async def view_stats_callback(callback: types.CallbackQuery):
         stats = cursor.fetchall()
 
     if not stats:
-        await callback.message.answer("📊 <b>Статистика пуста.</b> Ни один чат еще не сохранен.")
+        await callback.message.answer("📊 Статистика пуста. Ни один чат еще не сохранен.")
         await callback.answer()
         return
 
@@ -742,7 +750,7 @@ async def get_archive_file_callback(callback: types.CallbackQuery):
         # Принудительно отправляем документ в чат овнеру
         await callback.message.answer_document(
             document=types.FSInputFile(file_path),
-            caption=f"📋 Полная история переписки с пользователем <code>{user_id}</code>"
+            caption=f"📋 Полная история переписки с пользователем {user_id}"
         )
     else:
         await callback.answer("⚠️ Физический файл лога был удален с сервера.", show_alert=True)
@@ -810,7 +818,7 @@ async def cmd_close(message: types.Message):
     update_dialog_status(target_user_id, "closed") 
     increment_admin_stat(uid)
     
-    await message.answer("✅ Обращение успешно закрыто. Лог диалога сохранен в архив.", parse_mode="HTML")
+    await message.answer("✅ Обращение успешно закрыто.", parse_mode="HTML")
     try:
         await bot.send_message(chat_id=target_user_id, text="✅ Ваше обращение успешно закрыто администратором.")
     except Exception: pass
