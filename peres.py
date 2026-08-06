@@ -1177,11 +1177,30 @@ async def handle_all_messages(message: types.Message):
         f"👉 Откройте /panel для ответа."
     )
 
+    # Извлекаем всех администраторов (и owner, и admin) из базы данных
+    admin_ids = []
     try:
-        # Изменили parse_mode на безопасный HTML
-        await bot.send_message(chat_id=OWNER_ID, text=admin_notification, parse_mode="HTML")
-    except Exception:
-        pass
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            # Достаем user_id всех, у кого роль admin или owner
+            cursor.execute("SELECT user_id FROM users_roles WHERE role IN ('admin', 'owner')")
+            rows = cursor.fetchall()
+            admin_ids = [row[0] for row in rows]
+    except Exception as e:
+        logging.error(f"Ошибка получения списка админов из БД: {e}")
+
+    # Если по какой-то причине БД не ответила, подстрахуемся вашим OWNER_ID
+    if not admin_ids:
+        admin_ids = [OWNER_ID]
+
+    # Рассылаем уведомление ВСЕМ найденным админам
+    for admin_id in admin_ids:
+        try:
+            await bot.send_message(chat_id=admin_id, text=admin_notification, parse_mode="HTML")
+        except Exception as e:
+            # Логируем ошибку, если кто-то из админов заблокировал бота, чтобы бот не падал на остальных
+            logging.warning(f"Не удалось отправить уведомление админу {admin_id}: {e}")
+
         
     await message.answer("🚀 Ваше обращение успешно зарегистрировано в системе. Ожидайте подключения администратора!")
 
