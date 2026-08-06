@@ -1177,33 +1177,32 @@ async def handle_all_messages(message: types.Message):
         f"👉 Откройте /panel для ответа."
     )
 
-    # Извлекаем всех администраторов (и owner, и admin) из базы данных
+    # Извлекаем всех администраторов (и owner, и admin) из таблицы admins
     admin_ids = []
     try:
         with sqlite3.connect(DB_FILE) as conn:
             cursor = conn.cursor()
-            # Достаем user_id всех, у кого роль admin или owner
-            cursor.execute("SELECT user_id FROM users_roles WHERE role IN ('admin', 'owner')")
+            # ТОЧНЫЙ ЗАПРОС К ВАШЕЙ ТАБЛИЦЕ admins
+            cursor.execute("SELECT user_id FROM admins WHERE role IN ('admin', 'owner')")
             rows = cursor.fetchall()
+            # Извлекаем числа из кортежей БД
             admin_ids = [row[0] for row in rows]
     except Exception as e:
-        logging.error(f"Ошибка получения списка админов из БД: {e}")
+        logging.error(f"Ошибка получения списка админов из таблицы admins: {e}")
 
-    # Если по какой-то причине БД не ответила, подстрахуемся вашим OWNER_ID
+    # Фолбек: если база данных недоступна, отправляем хотя бы создателю
     if not admin_ids:
         admin_ids = [OWNER_ID]
 
-    # Рассылаем уведомление ВСЕМ найденным админам
+    # Рассылаем уведомление ВСЕМ найденным админам по очереди
     for admin_id in admin_ids:
         try:
             await bot.send_message(chat_id=admin_id, text=admin_notification, parse_mode="HTML")
         except Exception as e:
-            # Логируем ошибку, если кто-то из админов заблокировал бота, чтобы бот не падал на остальных
+            # Если один админ заблокировал бота, цикл не прервется и отправит остальным
             logging.warning(f"Не удалось отправить уведомление админу {admin_id}: {e}")
-
         
     await message.answer("🚀 Ваше обращение успешно зарегистрировано в системе. Ожидайте подключения администратора!")
-
 
 # --- ЗАПУСК БОТА ---
 async def main():
