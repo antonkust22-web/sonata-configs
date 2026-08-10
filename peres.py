@@ -128,6 +128,15 @@ def init_db():
             )
         """)
 
+        # Таблица для фиксации режима отдыха/выходных администраторов (Новая)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS admin_rest (
+                admin_id INTEGER PRIMARY KEY,
+                is_resting INTEGER DEFAULT 0,
+                updated_at TEXT
+            )
+        """)
+
 
 
 
@@ -366,6 +375,34 @@ def unban_user_in_db(user_id: int):
         conn.commit()
 
 
+def set_admin_rest_status(admin_id: int, status: int):
+    """Устанавливает статус отдыха для админа (1 - отдыхает, 0 - работает)"""
+    now_str = dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        # INSERT OR REPLACE создаст строку, если её нет, или обновит существующую
+        cursor.execute(
+            "INSERT OR REPLACE INTO admin_rest (admin_id, is_resting, updated_at) VALUES (?, ?, ?)",
+            (admin_id, status, now_str)
+        )
+        conn.commit()
+
+def is_admin_resting(admin_id: int) -> bool:
+    """Проверяет, находится ли админ на выходном"""
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT is_resting FROM admin_rest WHERE admin_id = ?", (admin_id,))
+            res = cursor.fetchone()
+            # Если записи нет — значит админ работает (возвращаем False)
+            return res and res == 1
+    except Exception as e:
+        logging.error(f"Ошибка проверки статуса отдыха админа {admin_id}: {e}")
+        return False
+
+
+
+
 
 
 
@@ -537,7 +574,7 @@ async def report_last_admin_callback(callback: types.CallbackQuery, state: FSMCo
     text = (
         "⚠️ <b>Оформление жалобы на работу поддержки</b>\n\n"
         "Пожалуйста, напишите в одном сообщении, с чем именно вы не согласны.\n\n"
-        "<i>Обратите внимание: на этот ответ вы можете пожаловаться только ОДИН раз. Вводите текст обдуманно.</i>"
+        "<i>Вводите текст обдуманно.</i>"
     )
     
     back_kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -658,10 +695,52 @@ async def cmd_panel(message: types.Message):
             "• /leave - Временно выйти из чата\n"
             "• /close - Полностью закрыть тикет\n"
             "• /ban - Заблокировать пользователя\n"
+            "• /rest - Уйти на выходной\n"
             "</pre>\n"
             "<i>Выберите активный диалог из списка ниже для начала общения:</i>"
         )
         await message.answer(info_text, reply_markup=get_admin_panel_kb(uid), parse_mode="HTML")
+
+
+
+
+from aiogram.filters import Command
+
+@dp.message(Command("rest"))
+async def cmd_rest(message: types.Message):
+    uid = message.from_user.id
+    if not is_admin(uid):
+        return
+
+    if is_admin_resting(uid):
+        await message.answer("🏖 Вы уже находитесь в режиме выходного!")
+        return
+
+    set_admin_rest_status(uid, 1)
+    await message.answer(
+        "🏖 <b>Режим «Выходной» успешно включен!</b>\n\n"
+        "Вам больше не будут приходить уведомления о новых обращениях пользователей.\n"
+        "Чтобы вернуться к работе, введите команду: <code>/work</code>",
+        parse_mode="HTML"
+    )
+
+@dp.message(Command("work"))
+async def cmd_work(message: types.Message):
+    uid = message.from_user.id
+    if not is_admin(uid):
+        return
+
+    if not is_admin_resting(uid):
+        await message.answer("🛠 Вы уже находитесь в рабочем режиме и получаете уведомления.")
+        return
+
+    set_admin_rest_status(uid, 0)
+    await message.answer(
+        "🛠 <b>Вы успешно вернулись с выходного!</b>\n\n"
+        "Уведомления о новых тикетах снова будут приходить вам в обычном режиме. Продуктивной работы!",
+        parse_mode="HTML"
+    )
+
 
 
 
@@ -688,6 +767,12 @@ async def open_chat(callback: types.CallbackQuery):
     admin_id = callback.from_user.id
     if not is_admin(admin_id):
         return
+
+    # ИСПРАВЛЕНО: Защита на случай, если админ на выходном пытается взять чат
+    if is_admin_resting(admin_id):
+        await callback.answer("⚠️ Вы находитесь в режиме выходного! Сначала введите /work, чтобы принимать чаты.", show_alert=True)
+        return
+    
     
     # Разбор данных callback_data: "chat_USERID_TOKEN"
     data_parts = callback.data.split("_")
@@ -1289,6 +1374,8 @@ async def back_to_panel_callback(callback: types.CallbackQuery):
         "📋 ШПАРАЛКА ПО УПРАВЛЕНИЮ ЧАТОМ:\n"
         "• /leave - Временно выйти из чата\n"
         "• /close - Полностью закрыть тикет\n"
+        "• /ban - Заблокировать пользователя\n"
+        "• /rest - Уйти на выходной\n"
         "</pre>\n"
         "<i>Выберите активный диалог из списка ниже для начала общения:</i>"
     )
@@ -1569,6 +1656,11 @@ async def handle_all_messages(message: types.Message):
 
     # Рассылаем уведомление ВСЕМ найденным админам по очереди
     for admin_id in admin_ids:
+            for admin_id in admin_ids:
+        # 💤 ИСПРАВЛЕНО: Проверяем, не находится ли администратор на выходном
+        if is_admin_resting(admin_id):
+            continue
+            
         try:
             await bot.send_message(chat_id=admin_id, text=admin_notification, parse_mode="HTML")
         except Exception as e:
