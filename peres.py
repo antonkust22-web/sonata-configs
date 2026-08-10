@@ -1642,29 +1642,35 @@ async def handle_all_messages(message: types.Message):
     try:
         with sqlite3.connect(DB_FILE) as conn:
             cursor = conn.cursor()
-            # ТОЧНЫЙ ЗАПРОС К ВАШЕЙ ТАБЛИЦЕ admins
             cursor.execute("SELECT user_id FROM admins WHERE role IN ('admin', 'owner')")
             rows = cursor.fetchall()
-            # Извлекаем числа из кортежей БД
+            # ИСПРАВЛЕНО: берем row[0], чтобы получить чистое число (ID), а не кортеж
             admin_ids = [row[0] for row in rows]
     except Exception as e:
         logging.error(f"Ошибка получения списка админов из таблицы admins: {e}")
 
     # Фолбек: если база данных недоступна, отправляем хотя бы создателю
     if not admin_ids:
-        admin_ids = [OWNER_ID]
+        # Укажите здесь ID овнера напрямую числом, если переменная OWNER_ID не объявлена глобально
+        admin_ids = [OWNER_ID] 
 
     # Рассылаем уведомление ВСЕМ найденным админам по очереди
     for admin_id in admin_ids:
-        # Проверяем, не находится ли администратор на выходном
-        if is_admin_resting(admin_id):
-            continue  # Пропускаем отправку уведомления
+        # Принудительно конвертируем в int для полной надежности
+        try:
+            current_id = int(admin_id)
+        except (ValueError, TypeError):
+            continue
+
+        # 💤 ТЕПЕРЬ ПРОВЕРКА СРАБОТАЕТ ИДЕАЛЬНО (передаем чистое число)
+        if is_admin_resting(current_id):
+            logging.info(f"🏖 [ОТДЫХ] Уведомление для админа {current_id} пропущено, так как он на выходном.")
+            continue  # Пропускаем отдыхающего админа
             
         try:
-            await bot.send_message(chat_id=admin_id, text=admin_notification, parse_mode="HTML")
+            await bot.send_message(chat_id=current_id, text=admin_notification, parse_mode="HTML")
         except Exception as e:
-            # Если один админ заблокировал бота, цикл не прервется и отправит остальным
-            logging.warning(f"Не удалось отправить уведомление админу {admin_id}: {e}")
+            logging.warning(f"Не удалось отправить уведомление админу {current_id}: {e}")
         
     await message.answer("🚀 Ваше обращение успешно зарегистрировано в системе. Ожидайте подключения администратора!")
 
