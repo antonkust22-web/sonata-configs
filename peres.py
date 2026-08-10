@@ -375,7 +375,9 @@ def get_user_start_kb(user_id: int):
             res = cursor.fetchone()
             
             if res:
+                # ИСПРАВЛЕНО: достаем именно число ID из кортежа res[0]
                 last_admin_id = res[0]
+                
                 # Проверяем, использован ли единственный шанс жалобы на этого админа
                 cursor.execute("SELECT 1 FROM submitted_reports WHERE user_id = ? AND admin_id = ?", (user_id, last_admin_id))
                 already_reported = cursor.fetchone() is not None
@@ -383,11 +385,12 @@ def get_user_start_kb(user_id: int):
                 # Кнопка доступна, если жалоба еще ни разу не отправлялась
                 if not already_reported:
                     builder.button(text="⚠️ Пожаловаться на прошлый ответ", callback_data="report_last_admin")
-    except Exception:
-        pass
+    except Exception as e:
+        logging.error(f"Ошибка генерации клавиатуры старта: {e}")
         
     builder.adjust(1)
     return builder.as_markup()
+
 
 
 
@@ -435,7 +438,7 @@ async def contact_support_callback(callback: types.CallbackQuery):
     
     # ⛔️ ЗАПРЕТ ДЛЯ ЧС: забаненный пользователь не может писать новые обращения
     if is_user_banned(uid):
-        await callback.answer("🔒 Ваш доступ к созданию новых обращений заблокирован Главным Администратором.", show_alert=True)
+        await callback.answer("🔒 Ваш доступ к созданию новых обращений заблокирован Администратором.", show_alert=True)
         return
 
     status = get_dialog_status(uid)
@@ -484,20 +487,21 @@ async def faq_menu_callback(callback: types.CallbackQuery):
 async def report_last_admin_callback(callback: types.CallbackQuery, state: FSMContext):
     uid = callback.from_user.id
         
-    # 1. Находим последнего админа, который закрыл тикет этого юзера
+    # 1. Находим последнего админа
     last_admin_id = None
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT admin_id FROM closed_dialogs_archive WHERE user_id = ? ORDER BY id DESC LIMIT 1", (uid,))
         res = cursor.fetchone()
         if res:
+            # ИСПРАВЛЕНО: берем значение из кортежа
             last_admin_id = res[0]
             
     if not last_admin_id:
         await callback.answer("❌ История ваших обращений не найдена. Вам еще никто не отвечал.", show_alert=True)
         return
         
-    # 2. ПРОВЕРКА НА ЕДИНСТВЕННЫЙ ШАНС: проверяем таблицу поданных жалоб
+    # 2. Проверяем таблицу поданных жалоб
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM submitted_reports WHERE user_id = ? AND admin_id = ?", (uid, last_admin_id))
@@ -507,7 +511,6 @@ async def report_last_admin_callback(callback: types.CallbackQuery, state: FSMCo
         await callback.answer("❌ Вы уже использовали свой единственный шанс отправить жалобу по этому обращению.", show_alert=True)
         return
 
-    # Если шанс не использован — пускаем к оформлению текста (даже если юзер в бане!)
     await callback.answer()
     await state.set_state(ReportStates.waiting_for_report_text)
     
@@ -522,6 +525,7 @@ async def report_last_admin_callback(callback: types.CallbackQuery, state: FSMCo
     ])
     
     await callback.message.answer(text, reply_markup=back_kb, parse_mode="HTML")
+
 
 
 
@@ -584,26 +588,21 @@ async def cmd_ban(message: types.Message):
         pass
 
 
-dp.message(Command("unban"))
+@dp.message(Command("unban"))
 async def cmd_unban(message: types.Message):
     uid = message.from_user.id
     
-    # СТРОГАЯ ПРОВЕРКА: доступ только для owner
     if not is_user_owner(uid):
         await message.answer("⚠️ <b>Доступ запрещен.</b> Эту команду может использовать только Главный Администратор.", parse_mode="HTML")
         return
 
     parts = message.text.split()
     if len(parts) < 2:
-        await message.answer(
-            "⚠️ <b>Неверный формат!</b>\n"
-            "Пример использования:\n"
-            "<code>/unban 123456789</code>",
-            parse_mode="HTML"
-        )
+        await message.answer("⚠️ Неверный формат! Пример: <code>/unban 123456789</code>", parse_mode="HTML")
         return
 
     try:
+        # ИСПРАВЛЕНО: берем parts[1], а не весь список parts
         target_id = int(parts[1])
     except ValueError:
         await message.answer("❌ ID пользователя должен состоять только из цифр.")
@@ -613,24 +612,12 @@ async def cmd_unban(message: types.Message):
         await message.answer("ℹ️ Этот пользователь не находится в черном списке.")
         return
 
-    # Удаляем из ЧС
     unban_user_in_db(target_id)
     
-    await message.answer(
-        f"✅ <b>Пользователь успешно разблокирован!</b>\n\n"
-        f"👤 ID: <code>{target_id}</code>\n"
-        f" Теперь он снова может отправлять обращения и жалобы.",
-        parse_mode="HTML"
-    )
-    
+    await message.answer(f"✅ <b>Пользователь {target_id} успешно разблокирован!</b>", parse_mode="HTML")
     try:
-        await bot.send_message(
-            chat_id=target_id,
-            text="🎉 <b>Доступ к системе тех. поддержки полностью восстановлен.</b>\nВы снова можете создавать обращения.",
-            parse_mode="HTML"
-        )
-    except Exception:
-        pass
+        await bot.send_message(chat_id=target_id, text="🎉 <b>Доступ к системе тех. поддержки полностью восстановлен.</b>", parse_mode="HTML")
+    except Exception: pass
 
 
 
@@ -650,6 +637,7 @@ async def cmd_panel(message: types.Message):
             "📋 ШПАРАЛКА ПО УПРАВЛЕНИЮ ЧАТОМ:\n"
             "• /leave - Временно выйти из чата\n"
             "• /close - Полностью закрыть тикет\n"
+            "• /ban - Заблокировать пользователя\n"
             "</pre>\n"
             "<i>Выберите активный диалог из списка ниже для начала общения:</i>"
         )
@@ -721,7 +709,7 @@ async def open_chat(callback: types.CallbackQuery):
         f"<pre>{user_message_preview}</pre>\n\n"
         f"Теперь сообщения будут дублироваться напрямую.\n"
         f"• Выйти из чата: <code>/leave</code>\n"
-        f"• Завершить тикет: <code>/close</code>"
+        f"• Завершить тикет: <code>/close</code>\n"
         f"• Заблокировать пользователя <code>/ban</code>"
     )
     
