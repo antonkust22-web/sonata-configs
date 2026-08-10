@@ -111,6 +111,15 @@ def init_db():
             )
         """)
 
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS banned_users (
+                user_id INTEGER PRIMARY KEY,
+                banned_at TEXT,
+                reason TEXT
+            )
+        """)
+
+
 
 init_db()
 
@@ -305,28 +314,81 @@ def get_admin_profile_data(admin_id: int):
 
 
 
+def ban_user_in_db(user_id: int, reason: str = "Спам/неадекватное поведение"):
+    """Добавляет пользователя в черный список"""
+    now_str = dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO banned_users (user_id, banned_at, reason) VALUES (?, ?, ?)",
+            (user_id, now_str, reason)
+        )
+        conn.commit()
+
+def is_user_banned(user_id: int) -> bool:
+    """Проверяет, находится ли пользователь в бане"""
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM banned_users WHERE user_id = ?", (user_id,))
+            return cursor.fetchone() is not None
+    except Exception:
+        return False
+
+def is_user_owner(user_id: int) -> bool:
+    """Проверяет, является ли пользователь Главным Администратором (owner)"""
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            # Проверяем роль в вашей таблице admins
+            cursor.execute("SELECT 1 FROM admins WHERE user_id = ? AND role = 'owner'", (user_id,))
+            return cursor.fetchone() is not None
+    except Exception as e:
+        logging.error(f"Ошибка проверки роли owner: {e}")
+        return False
+
+
+def unban_user_in_db(user_id: int):
+    """Удаляет пользователя из черного списка"""
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM banned_users WHERE user_id = ?", (user_id,))
+        conn.commit()
+
+
+
+
+
+
+
 # --- КЛАВИАТУРЫ ---
 def get_user_start_kb(user_id: int):
-    """Клавиатура для главного меню с динамической кнопкой жалобы"""
     builder = InlineKeyboardBuilder()
     builder.button(text="✍️ Написать в тех. поддержку", callback_data="contact_support")
     builder.button(text="❓ Часто задаваемые вопросы (FAQ)", callback_data="faq_menu")
     
-    # Проверяем в БД, есть ли закрытые диалоги с этим пользователем
     try:
         with sqlite3.connect(DB_FILE) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT 1 FROM closed_dialogs_archive WHERE user_id = ? LIMIT 1", (user_id,))
-            has_history = cursor.fetchone() is not None
+            # Берем последнего обслуживавшего админа
+            cursor.execute("SELECT admin_id FROM closed_dialogs_archive WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user_id,))
+            res = cursor.fetchone()
+            
+            if res:
+                last_admin_id = res[0]
+                # Проверяем, использован ли единственный шанс жалобы на этого админа
+                cursor.execute("SELECT 1 FROM submitted_reports WHERE user_id = ? AND admin_id = ?", (user_id, last_admin_id))
+                already_reported = cursor.fetchone() is not None
+                
+                # Кнопка доступна, если жалоба еще ни разу не отправлялась
+                if not already_reported:
+                    builder.button(text="⚠️ Пожаловаться на прошлый ответ", callback_data="report_last_admin")
     except Exception:
-        has_history = False
-
-    # Если админ ему уже отвечал ранее, добавляем кнопку жалобы
-    if has_history:
-        builder.button(text="⚠️ Пожаловаться на прошлый ответ", callback_data="report_last_admin")
+        pass
         
     builder.adjust(1)
     return builder.as_markup()
+
 
 
 def get_admin_panel_kb(user_id: int):
@@ -370,13 +432,19 @@ async def cmd_start(message: types.Message):
 @dp.callback_query(F.data == "contact_support")
 async def contact_support_callback(callback: types.CallbackQuery):
     uid = callback.from_user.id
-    status = get_dialog_status(uid)
     
+    # ⛔️ ЗАПРЕТ ДЛЯ ЧС: забаненный пользователь не может писать новые обращения
+    if is_user_banned(uid):
+        await callback.answer("🔒 Ваш доступ к созданию новых обращений заблокирован Главным Администратором.", show_alert=True)
+        return
+
+    status = get_dialog_status(uid)
     if status in ["open", "chatting"]:
         await callback.message.answer("⏳ У вас уже есть активный вопрос в разработке. Пожалуйста, ожидайте ответа.")
     else:
         await callback.message.answer("📥 Пожалуйста, отправьте ваше сообщение или файл в этот чат, и мы сразу передадим его агентам техподдержки.")
     await callback.answer()
+
 
 
 
@@ -414,18 +482,41 @@ async def faq_menu_callback(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "report_last_admin")
 async def report_last_admin_callback(callback: types.CallbackQuery, state: FSMContext):
+    uid = callback.from_user.id
+        
+    # 1. Находим последнего админа, который закрыл тикет этого юзера
+    last_admin_id = None
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT admin_id FROM closed_dialogs_archive WHERE user_id = ? ORDER BY id DESC LIMIT 1", (uid,))
+        res = cursor.fetchone()
+        if res:
+            last_admin_id = res[0]
+            
+    if not last_admin_id:
+        await callback.answer("❌ История ваших обращений не найдена. Вам еще никто не отвечал.", show_alert=True)
+        return
+        
+    # 2. ПРОВЕРКА НА ЕДИНСТВЕННЫЙ ШАНС: проверяем таблицу поданных жалоб
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM submitted_reports WHERE user_id = ? AND admin_id = ?", (uid, last_admin_id))
+        already_reported = cursor.fetchone() is not None
+        
+    if already_reported:
+        await callback.answer("❌ Вы уже использовали свой единственный шанс отправить жалобу по этому обращению.", show_alert=True)
+        return
+
+    # Если шанс не использован — пускаем к оформлению текста (даже если юзер в бане!)
     await callback.answer()
-    
     await state.set_state(ReportStates.waiting_for_report_text)
     
     text = (
         "⚠️ <b>Оформление жалобы на работу поддержки</b>\n\n"
-        "Пожалуйста, напишите в одном сообщении, с чем именно вы не согласны "
-        "или опишите некорректное поведение администратора.\n\n"
-        "<i>Ваша жалоба вместе с историей переписки будет моментально передана Главному Администратору (Овнеру).</i>"
+        "Пожалуйста, напишите в одном сообщении, с чем именно вы не согласны.\n\n"
+        "<i>Обратите внимание: на этот ответ вы можете пожаловаться только ОДИН раз. Вводите текст обдуманно.</i>"
     )
     
-    # Кнопка отмены, используем ваш стандартный 'back', который сбросит состояние
     back_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Отмена", callback_data="back")]
     ])
@@ -434,7 +525,114 @@ async def report_last_admin_callback(callback: types.CallbackQuery, state: FSMCo
 
 
 
+
 # --- КОМАНДЫ И ОБРАБОТКА ДЛЯ АДМИНОВ ---
+
+
+from aiogram.filters import Command
+
+@dp.message(Command("ban"))
+async def cmd_ban(message: types.Message):
+    uid = message.from_user.id
+    # Проверяем, что команду вводит админ
+    if not is_admin(uid):
+        return
+
+    parts = message.text.split(maxsplit=2)
+    if len(parts) < 2:
+        await message.answer(
+            "⚠️ <b>Неверный формат команды!</b>\n\n"
+            "Пример использования:\n"
+            "<code>/ban 123456789 Спам в репорты</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    # Проверяем корректность ID пользователя
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await message.answer("❌ ID пользователя должен состоять только из цифр.")
+        return
+
+    # Получаем причину, если она указана
+    reason = parts[2] if len(parts) > 2 else "Нарушение правил общения с поддержкой"
+
+    # Защита от бана самого себя или овнера
+    if target_id == uid or target_id == 8759913724:
+        await message.answer("❌ Вы не можете заблокировать этого пользователя.")
+        return
+
+    # Добавляем в ЧС
+    ban_user_in_db(target_id, reason)
+    
+    await message.answer(
+        f"⛔️ <b>Пользователь успешно заблокирован!</b>\n\n"
+        f"👤 ID: <code>{target_id}</code>\n"
+        f"📝 Причина: <i>{reason}</i>",
+        parse_mode="HTML"
+    )
+    
+    # Уведомляем нарушителя (если он не заблокировал бота)
+    try:
+        await bot.send_message(
+            chat_id=target_id,
+            text=f"🔒 <b>Доступ к поддержке ограничен.</b>\nПричина: {reason}",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
+
+dp.message(Command("unban"))
+async def cmd_unban(message: types.Message):
+    uid = message.from_user.id
+    
+    # СТРОГАЯ ПРОВЕРКА: доступ только для owner
+    if not is_user_owner(uid):
+        await message.answer("⚠️ <b>Доступ запрещен.</b> Эту команду может использовать только Главный Администратор.", parse_mode="HTML")
+        return
+
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer(
+            "⚠️ <b>Неверный формат!</b>\n"
+            "Пример использования:\n"
+            "<code>/unban 123456789</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await message.answer("❌ ID пользователя должен состоять только из цифр.")
+        return
+
+    if not is_user_banned(target_id):
+        await message.answer("ℹ️ Этот пользователь не находится в черном списке.")
+        return
+
+    # Удаляем из ЧС
+    unban_user_in_db(target_id)
+    
+    await message.answer(
+        f"✅ <b>Пользователь успешно разблокирован!</b>\n\n"
+        f"👤 ID: <code>{target_id}</code>\n"
+        f" Теперь он снова может отправлять обращения и жалобы.",
+        parse_mode="HTML"
+    )
+    
+    try:
+        await bot.send_message(
+            chat_id=target_id,
+            text="🎉 <b>Доступ к системе тех. поддержки полностью восстановлен.</b>\nВы снова можете создавать обращения.",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
+
 
 @dp.message(Command("panel"))
 async def cmd_panel(message: types.Message):
@@ -524,6 +722,7 @@ async def open_chat(callback: types.CallbackQuery):
         f"Теперь сообщения будут дублироваться напрямую.\n"
         f"• Выйти из чата: <code>/leave</code>\n"
         f"• Завершить тикет: <code>/close</code>"
+        f"• Заблокировать пользователя <code>/ban</code>"
     )
     
     # Отправляем админу карточку входа и цитату
@@ -598,12 +797,11 @@ async def handle_report_text(message: types.Message, state: FSMContext):
     username = message.from_user.username or "Не указан"
     report_text = message.text
     
-    await state.clear() # Сбрасываем состояние
+    await state.clear() # Очищаем состояние FSM
     
-    # 1. Находим в БД последний закрытый диалог этого пользователя, чтобы узнать ID админа
+    # 1. Находим последний закрытый диалог
     last_admin_id = None
     chat_file_path = None
-    
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -615,29 +813,37 @@ async def handle_report_text(message: types.Message, state: FSMContext):
             last_admin_id, chat_file_path = res[0], res[1]
 
     if not last_admin_id:
-        await message.answer("❌ Произошла ошибка. Не удалось найти администратора, который вас обслуживал.")
+        await message.answer("❌ Ошибка поиска администратора.")
         return
 
-    # 2. ИСПРАВЛЕНО: Динамически ищем Telegram ID Главного Админа (owner) в базе данных
+    # 2. Ищем Telegram ID Овнера в вашей таблице 'admins'
     owner_id = None
     try:
         with sqlite3.connect(DB_FILE) as conn:
             cursor = conn.cursor()
-            # Делаем запрос к таблице статистики/профилей админов
-            # (Если ваша таблица или колонка называется иначе, поправьте их названия ниже)
-            cursor.execute("SELECT admin_id FROM admin_stats WHERE role = 'owner' LIMIT 1")
+            cursor.execute("SELECT user_id FROM admins WHERE role = 'owner' LIMIT 1")
             owner_res = cursor.fetchone()
             if owner_res:
                 owner_id = owner_res[0]
     except Exception as db_err:
         logging.error(f"Ошибка при поиске овнера в БД: {db_err}")
 
-    # Запасной вариант: если в БД роль owner не найдена, подставляем ваш реальный ID создателя
-    # Замените это число на ваш настоящий ID, если в базе вдруг не окажется роли 'owner'
     if not owner_id:
-        owner_id = 8840224964 
+        owner_id = 8759913724 # Запасной ID со скриншота
 
-    # 3. Формируем карточку жалобы для овнера
+    # 3. ФИКСИРУЕМ ИСПОЛЬЗОВАНИЕ ШАНСА: записываем в таблицу жалоб
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR IGNORE INTO submitted_reports (user_id, admin_id) VALUES (?, ?)", 
+                (user_id, last_admin_id)
+            )
+            conn.commit()
+    except Exception as e:
+        logging.error(f"Ошибка фиксации использованного шанса в БД: {e}")
+
+    # 4. Формируем карточку для Главного Админа
     owner_msg_text = (
         f"🚨 <b>ПОСТУПИЛА НОВАЯ ЖАЛОБА НА АДМИНА!</b>\n\n"
         f"👤 <b>Отправитель:</b> {message.from_user.mention_html()} (ID: <code>{user_id}</code>)\n"
@@ -645,33 +851,26 @@ async def handle_report_text(message: types.Message, state: FSMContext):
         f"📝 <b>Текст жалобы:</b>\n<i>{report_text}</i>"
     )
 
-    # 4. Отправляем жалобу Главному Админу
+    # 5. Отправляем жалобу и файл лога Овнеру
     try:
         import os
         if chat_file_path and os.path.exists(chat_file_path):
             from aiogram.types import FSInputFile
             document = FSInputFile(chat_file_path)
-            # Отправляем овнеру файл истории вместе с текстом
-            await bot.send_document(
-                chat_id=owner_id, 
-                document=document, 
-                caption=owner_msg_text, 
-                parse_mode="HTML"
-            )
+            await bot.send_document(chat_id=owner_id, document=document, caption=owner_msg_text, parse_mode="HTML")
         else:
-            # Если файла лога почему-то нет, отправляем только текст жалобы
             await bot.send_message(chat_id=owner_id, text=owner_msg_text, parse_mode="HTML")
             
-        # 5. Отвечаем пользователю (отправителю)
+        # 6. Отвечаем пользователю
         await message.answer(
-            "✅ <b>Ваша жалоба успешно отправлена!</b>\n"
-            "Руководство проекта рассмотрит её в ближайшее время. Приносим извинения за неудобства.",
+            "✅ <b>Ваша жалоба успешно отправлена Овнеру!</b>\n"
+            "Руководство проекта рассмотрит её в ближайшее время.",
             reply_markup=get_user_start_kb(user_id),
             parse_mode="HTML"
         )
     except Exception as e:
-        logging.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: Не удалось доставить жалобу овнеру (ID: {owner_id}): {e}", exc_info=True)
-        await message.answer("⚠️ Произошла ошибка при отправке жалобы. Администрация уже уведомлена о сбое.")
+        logging.error(f"❌ Не удалось доставить жалобу овнеру (ID: {owner_id}): {e}", exc_info=True)
+        await message.answer("⚠️ Произошла ошибка при доставке вашей жалобы администрации.")
 
 
 
