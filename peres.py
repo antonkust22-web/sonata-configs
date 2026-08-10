@@ -10,6 +10,9 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+class ReportStates(StatesGroup):
+    waiting_for_report_text = State()  # Ожидание текста жалобы от пользователя
+
 
 import os
 os.makedirs("chat_logs", exist_ok=True)
@@ -303,13 +306,28 @@ def get_admin_profile_data(admin_id: int):
 
 
 # --- КЛАВИАТУРЫ ---
-def get_user_start_kb():
-    """Клавиатура для главного меню пользователя при /start"""
+def get_user_start_kb(user_id: int):
+    """Клавиатура для главного меню с динамической кнопкой жалобы"""
     builder = InlineKeyboardBuilder()
     builder.button(text="✍️ Написать в тех. поддержку", callback_data="contact_support")
     builder.button(text="❓ Часто задаваемые вопросы (FAQ)", callback_data="faq_menu")
+    
+    # Проверяем в БД, есть ли закрытые диалоги с этим пользователем
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM closed_dialogs_archive WHERE user_id = ? LIMIT 1", (user_id,))
+            has_history = cursor.fetchone() is not None
+    except Exception:
+        has_history = False
+
+    # Если админ ему уже отвечал ранее, добавляем кнопку жалобы
+    if has_history:
+        builder.button(text="⚠️ Пожаловаться на прошлый ответ", callback_data="report_last_admin")
+        
     builder.adjust(1)
     return builder.as_markup()
+
 
 def get_admin_panel_kb(user_id: int):
     builder = InlineKeyboardBuilder()
@@ -343,8 +361,11 @@ async def cmd_start(message: types.Message):
         await message.answer(
             f"👋 Здравствуйте, {message.from_user.first_name}!\n"
             f"Добро пожаловать в нашего бота поддержки. Выберите интересующий вас раздел:",
-            reply_markup=get_user_start_kb()
+            # ИСПРАВЛЕНО: передаем uid для проверки истории
+            reply_markup=get_user_start_kb(uid) 
         )
+
+
 
 @dp.callback_query(F.data == "contact_support")
 async def contact_support_callback(callback: types.CallbackQuery):
@@ -388,6 +409,28 @@ async def faq_menu_callback(callback: types.CallbackQuery):
     # Отправляем красивый HTML-текст
     await callback.message.answer(faq_text, parse_mode="HTML")
     await callback.answer()
+
+
+
+@dp.callback_query(F.data == "report_last_admin")
+async def report_last_admin_callback(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    
+    await state.set_state(ReportStates.waiting_for_report_text)
+    
+    text = (
+        "⚠️ <b>Оформление жалобы на работу поддержки</b>\n\n"
+        "Пожалуйста, напишите в одном сообщении, с чем именно вы не согласны "
+        "или опишите некорректное поведение администратора.\n\n"
+        "<i>Ваша жалоба вместе с историей переписки будет моментально передана Главному Администратору (Овнеру).</i>"
+    )
+    
+    # Кнопка отмены, используем ваш стандартный 'back', который сбросит состояние
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="back")]
+    ])
+    
+    await callback.message.answer(text, reply_markup=back_kb, parse_mode="HTML")
 
 
 
@@ -549,6 +592,74 @@ async def manage_admins_callback(callback: types.CallbackQuery, state: FSMContex
 
 
 
+@dp.message(ReportStates.waiting_for_report_text, F.text)
+async def handle_report_text(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    username = message.from_user.username or "Не указан"
+    report_text = message.text
+    
+    await state.clear() # Сбрасываем состояние
+    
+    # Находим в БД последний закрытый диалог этого пользователя
+    last_admin_id = None
+    chat_file_path = None
+    
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT admin_id, file_path FROM closed_dialogs_archive WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+            (user_id,)
+        )
+        res = cursor.fetchone()
+        if res:
+            last_admin_id, chat_file_path = res[0], res[1]
+
+    if not last_admin_id:
+        await message.answer("❌ Произошла ошибка. Не удалось найти администратора, который вас обслуживал.")
+        return
+
+    # Получаем ID овнера. Если у вас используется функция `is_owner`, 
+    # предположим, что у вас есть переменная OWNER_ID. Замените её на вашу, если она называется иначе.
+    # В качестве примера возьмем из вашего первого лога аккаунт создателя (или подставьте ваш реальный Telegram ID)
+    OWNER_ID = 8840224964 # Укажите здесь ID главного админа/овнера цифрами
+
+    # Формируем карточку жалобы для овнера
+    owner_msg_text = (
+        f"🚨 <b>ПОСТУПИЛА НОВАЯ ЖАЛОБА НА АДМИНА!</b>\n\n"
+        f"👤 <b>Отправитель:</b> {message.from_user.mention_html()} (ID: <code>{user_id}</code>)\n"
+        f"👮‍♂️ <b>На кого жалоба:</b> Администратор ID <code>{last_admin_id}</code>\n\n"
+        f"📝 <b>Текст жалобы:</b>\n<i>{report_text}</i>"
+    )
+
+    # Отправляем овнеру
+    try:
+        # Проверяем, существует ли файл истории чата, чтобы сразу скинуть его овнеру
+        import os
+        if chat_file_path and os.path.exists(chat_file_path):
+            from aiogram.types import FSInputFile
+            document = FSInputFile(chat_file_path)
+            await bot.send_document(
+                chat_id=OWNER_ID, 
+                document=document, 
+                caption=owner_msg_text, 
+                parse_mode="HTML"
+            )
+        else:
+            # Если файла нет, шлем просто текстом
+            await bot.send_message(chat_id=OWNER_ID, text=owner_msg_text, parse_mode="HTML")
+            
+        # Отвечаем пользователю
+        await message.answer(
+            "✅ <b>Ваша жалоба успешно отправлена!</b>\n"
+            "Руководство проекта рассмотрит её в ближайшее время. Приносим извинения за неудобства.",
+            reply_markup=get_user_start_kb(user_id),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logging.error(f"Не удалось отправить жалобу овнеру: {e}")
+        await message.answer("⚠️ Произошла ошибка при отправке жалобы. Пожалуйста, попробуйте позже.")
+
+
 
 
 
@@ -701,32 +812,72 @@ async def view_stats_callback(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("arch_adm_"))
 async def view_admin_archive_callback(callback: types.CallbackQuery):
-    """Показывает список закрытых чатов выбранного админа"""
+    """Показывает полную статистику и список закрытых чатов выбранного админа"""
     adm_id = int(callback.data.split("_")[2])
+    
+    # Подстраиваем формат под вашу запись: "10.08.2026"
+    today_date_str = dt.datetime.now().strftime('%d.%m.%Y')
     
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
-        # Достаем последние 10 закрытых этим админом чатов
+        
+        # 1. Считаем тикеты за ВСЕ ВРЕМЯ (без лимитов)
         cursor.execute(
-            "SELECT id, user_id, username, closed_at FROM closed_dialogs_archive WHERE admin_id = ? ORDER BY id DESC LIMIT 10",
+            "SELECT COUNT(*) FROM closed_dialogs_archive WHERE admin_id = ?", 
             (adm_id,)
         )
-        archive = cursor.fetchall()
+        total_tickets = cursor.fetchone()[0]
+        
+        # 2. Считаем тикеты ЗА СЕГОДНЯ (Ищем вашу строку формата 10.08.2026 в %H:%M:%S)
+        cursor.execute(
+            "SELECT COUNT(*) FROM closed_dialogs_archive WHERE admin_id = ? AND closed_at LIKE ?", 
+            (adm_id, f"{today_date_str}%")
+        )
+        today_tickets = cursor.fetchone()[0]
+        
+        # 3. Достаем абсолютно ВСЕ закрытые чаты этого админа
+        cursor.execute(
+            "SELECT id, user_id, username, closed_at FROM closed_dialogs_archive WHERE admin_id = ? ORDER BY id DESC",
+            (adm_id,)
+        )
+        all_archive = cursor.fetchall()
 
     builder = InlineKeyboardBuilder()
-    text = f"📂 <b>Последние закрытые чаты админа</b> <code>{adm_id}</code>:\n<i>Нажмите на кнопку чата, чтобы получить .txt файл истории</i>"
     
-    if not archive:
-        text = "❌ У этого админа пока нет записанных логов в архиве."
+    # Формируем карточку статистики
+    text = (
+        f"👤 <b>Профиль администратора:</b> <code>{adm_id}</code>\n\n"
+        f"📊 <b>Статистика тикетов:</b>\n"
+        f"├ За сегодня: <b>{today_tickets} шт.</b>\n"
+        f"└ За все время: <b>{total_tickets} шт.</b>\n\n"
+        f"📂 <b>Список всех закрытых диалогов ({len(all_archive)} шт.):</b>\n"
+    )
+    
+    if not all_archive:
+        text += "❌ <i>У этого админа пока нет записанных логов в архиве.</i>\n"
     else:
-        for arch_id, u_id, name, date in archive:
-            builder.button(text=f"📄 Юзер {u_id} ({name}) - {date}", callback_data=f"getfile_{arch_id}")
+        # Чтобы не раздувать кнопки, выводим ВСЕ диалоги списком в тексте
+        for idx, (arch_id, u_id, name, date) in enumerate(all_archive, 1):
+            # В текст пишем абсолютно все диалоги
+            text += f" {idx}. Юзер <code>{u_id}</code> ({name}) — <i>{date}</i>\n"
             
-    builder.button(text="⬅️ Назад к админам", callback_data="view_stats")
+            # А кнопки создания файлов делаем ТОЛЬКО для последних 5, чтобы Telegram не выдал ошибку
+            if idx <= 5:
+                builder.button(text=f"📄 Скачать лог: {name}", callback_data=f"getfile_{arch_id}")
+    
+    text += "\n<i>*Кнопки доступны только для 5 последних диалогов во избежание зависания Telegram.</i>"
+            
+    builder.button(text="⬅️ Назад к списку админов", callback_data="view_stats")
     builder.adjust(1)
     
+    # Если текст получился слишком длинным (больше 4096 символов), Telegram его обрежет. 
+    # Защита от слишком длинного списка:
+    if len(text) > 4000:
+        text = text[:3900] + "\n\n⚠️ <i>Список слишком длинный и был обрезан...</i>"
+
     await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
     await callback.answer()
+
 
 
 @dp.callback_query(F.data.startswith("getfile_"))
