@@ -600,7 +600,7 @@ async def handle_report_text(message: types.Message, state: FSMContext):
     
     await state.clear() # Сбрасываем состояние
     
-    # Находим в БД последний закрытый диалог этого пользователя
+    # 1. Находим в БД последний закрытый диалог этого пользователя, чтобы узнать ID админа
     last_admin_id = None
     chat_file_path = None
     
@@ -618,12 +618,26 @@ async def handle_report_text(message: types.Message, state: FSMContext):
         await message.answer("❌ Произошла ошибка. Не удалось найти администратора, который вас обслуживал.")
         return
 
-    # Получаем ID овнера. Если у вас используется функция `is_owner`, 
-    # предположим, что у вас есть переменная OWNER_ID. Замените её на вашу, если она называется иначе.
-    # В качестве примера возьмем из вашего первого лога аккаунт создателя (или подставьте ваш реальный Telegram ID)
-    OWNER_ID = 8840224964 # Укажите здесь ID главного админа/овнера цифрами
+    # 2. ИСПРАВЛЕНО: Динамически ищем Telegram ID Главного Админа (owner) в базе данных
+    owner_id = None
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            # Делаем запрос к таблице статистики/профилей админов
+            # (Если ваша таблица или колонка называется иначе, поправьте их названия ниже)
+            cursor.execute("SELECT admin_id FROM admin_stats WHERE role = 'owner' LIMIT 1")
+            owner_res = cursor.fetchone()
+            if owner_res:
+                owner_id = owner_res[0]
+    except Exception as db_err:
+        logging.error(f"Ошибка при поиске овнера в БД: {db_err}")
 
-    # Формируем карточку жалобы для овнера
+    # Запасной вариант: если в БД роль owner не найдена, подставляем ваш реальный ID создателя
+    # Замените это число на ваш настоящий ID, если в базе вдруг не окажется роли 'owner'
+    if not owner_id:
+        owner_id = 8840224964 
+
+    # 3. Формируем карточку жалобы для овнера
     owner_msg_text = (
         f"🚨 <b>ПОСТУПИЛА НОВАЯ ЖАЛОБА НА АДМИНА!</b>\n\n"
         f"👤 <b>Отправитель:</b> {message.from_user.mention_html()} (ID: <code>{user_id}</code>)\n"
@@ -631,24 +645,24 @@ async def handle_report_text(message: types.Message, state: FSMContext):
         f"📝 <b>Текст жалобы:</b>\n<i>{report_text}</i>"
     )
 
-    # Отправляем овнеру
+    # 4. Отправляем жалобу Главному Админу
     try:
-        # Проверяем, существует ли файл истории чата, чтобы сразу скинуть его овнеру
         import os
         if chat_file_path and os.path.exists(chat_file_path):
             from aiogram.types import FSInputFile
             document = FSInputFile(chat_file_path)
+            # Отправляем овнеру файл истории вместе с текстом
             await bot.send_document(
-                chat_id=OWNER_ID, 
+                chat_id=owner_id, 
                 document=document, 
                 caption=owner_msg_text, 
                 parse_mode="HTML"
             )
         else:
-            # Если файла нет, шлем просто текстом
-            await bot.send_message(chat_id=OWNER_ID, text=owner_msg_text, parse_mode="HTML")
+            # Если файла лога почему-то нет, отправляем только текст жалобы
+            await bot.send_message(chat_id=owner_id, text=owner_msg_text, parse_mode="HTML")
             
-        # Отвечаем пользователю
+        # 5. Отвечаем пользователю (отправителю)
         await message.answer(
             "✅ <b>Ваша жалоба успешно отправлена!</b>\n"
             "Руководство проекта рассмотрит её в ближайшее время. Приносим извинения за неудобства.",
@@ -656,8 +670,9 @@ async def handle_report_text(message: types.Message, state: FSMContext):
             parse_mode="HTML"
         )
     except Exception as e:
-        logging.error(f"Не удалось отправить жалобу овнеру: {e}")
-        await message.answer("⚠️ Произошла ошибка при отправке жалобы. Пожалуйста, попробуйте позже.")
+        logging.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: Не удалось доставить жалобу овнеру (ID: {owner_id}): {e}", exc_info=True)
+        await message.answer("⚠️ Произошла ошибка при отправке жалобы. Администрация уже уведомлена о сбое.")
+
 
 
 
