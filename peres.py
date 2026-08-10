@@ -1656,10 +1656,9 @@ async def handle_all_messages(message: types.Message):
 
     # Рассылаем уведомление ВСЕМ найденным админам по очереди
     for admin_id in admin_ids:
-            for admin_id in admin_ids:
-        # 💤 ИСПРАВЛЕНО: Проверяем, не находится ли администратор на выходном
+        # Проверяем, не находится ли администратор на выходном
         if is_admin_resting(admin_id):
-            continue
+            continue  # Пропускаем отправку уведомления
             
         try:
             await bot.send_message(chat_id=admin_id, text=admin_notification, parse_mode="HTML")
