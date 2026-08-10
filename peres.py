@@ -119,6 +119,16 @@ def init_db():
             )
         """)
 
+        # Таблица для фиксации использованных шансов отправки жалобы (Новая)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS submitted_reports (
+                user_id INTEGER,
+                admin_id INTEGER,
+                PRIMARY KEY (user_id, admin_id)
+            )
+        """)
+
+
 
 
 init_db()
@@ -370,19 +380,23 @@ def get_user_start_kb(user_id: int):
     try:
         with sqlite3.connect(DB_FILE) as conn:
             cursor = conn.cursor()
-            # Берем последнего обслуживавшего админа
+            # 1. Находим последний закрытый тикет пользователя
             cursor.execute("SELECT admin_id FROM closed_dialogs_archive WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user_id,))
             res = cursor.fetchone()
             
             if res:
-                # ИСПРАВЛЕНО: достаем именно число ID из кортежа res[0]
                 last_admin_id = res[0]
                 
-                # Проверяем, использован ли единственный шанс жалобы на этого админа
-                cursor.execute("SELECT 1 FROM submitted_reports WHERE user_id = ? AND admin_id = ?", (user_id, last_admin_id))
-                already_reported = cursor.fetchone() is not None
+                # 2. Проверяем, отправлялась ли жалоба
+                already_reported = False
+                try:
+                    cursor.execute("SELECT 1 FROM submitted_reports WHERE user_id = ? AND admin_id = ?", (user_id, last_admin_id))
+                    already_reported = cursor.fetchone() is not None
+                except sqlite3.OperationalError:
+                    # Если таблицы еще нет, считаем, что жалоб не было
+                    already_reported = False
                 
-                # Кнопка доступна, если жалоба еще ни разу не отправлялась
+                # Показываем кнопку, если жалоба еще не подавалась
                 if not already_reported:
                     builder.button(text="⚠️ Пожаловаться на прошлый ответ", callback_data="report_last_admin")
     except Exception as e:
@@ -390,6 +404,7 @@ def get_user_start_kb(user_id: int):
         
     builder.adjust(1)
     return builder.as_markup()
+
 
 
 
@@ -501,11 +516,16 @@ async def report_last_admin_callback(callback: types.CallbackQuery, state: FSMCo
         await callback.answer("❌ История ваших обращений не найдена. Вам еще никто не отвечал.", show_alert=True)
         return
         
-    # 2. Проверяем таблицу поданных жалоб
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1 FROM submitted_reports WHERE user_id = ? AND admin_id = ?", (uid, last_admin_id))
-        already_reported = cursor.fetchone() is not None
+    # 2. Проверяем таблицу поданных жалоб с защитой от ошибок
+    already_reported = False
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM submitted_reports WHERE user_id = ? AND admin_id = ?", (uid, last_admin_id))
+            already_reported = cursor.fetchone() is not None
+    except sqlite3.OperationalError:
+        already_reported = False # Если таблицы нет, пропускаем проверку лимита
+
         
     if already_reported:
         await callback.answer("❌ Вы уже использовали свой единственный шанс отправить жалобу по этому обращению.", show_alert=True)
