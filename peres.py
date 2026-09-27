@@ -1672,10 +1672,19 @@ async def handle_all_messages(message: types.Message):
         
     await message.answer("🚀 Ваше обращение успешно зарегистрировано в системе. Ожидайте подключения администратора!")
 
-# --- ЗАПУСК БОТА ---
 async def main():
-    print("Бот со встроенной защитой токенов, оформлением и статистикой запущен...")
+    # Насильно выбиваем чужие вебхуки конструкторов техподдержки 
+    # и очищаем очередь накопившихся сообщений
+    logging.info("🧹 Очищаю сторонние вебхуки и сбрасываю конфликты...")
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    # Запускаем опрос
+    logging.info("🚀 Бот успешно перехвачен и запущен в режиме polling!")
     await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
 
 if __name__ == "__main__":
     asyncio.run(main())
