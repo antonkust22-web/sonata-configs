@@ -10,6 +10,31 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+import sys
+import subprocess
+
+
+# 🔥 БЛОК АВТО-УСТАНОВКИ: Бот сам установит драйвер MySQL на хостинге
+try:
+    import mysql.connector
+except ModuleNotFoundError:
+    logging.info("📦 Библиотека mysql-connector не найдена. Запускаю автоматическую установку...")
+    try:
+        # Запускаем pip скрытно через системный процесс Python
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "mysql-connector-python"])
+        import mysql.connector
+        logging.info("✅ Драйвер MySQL успешно установлен и подключен!")
+    except Exception as e:
+        logging.critical(f"❌ Не удалось автоматически установить драйвер базы данных: {e}")
+        sys.exit(1)
+
+# Теперь все остальные ваши стандартные импорты могут спокойно идти дальше:
+import datetime as dt
+import time
+# ... и так далее
+
+
 class ReportStates(StatesGroup):
     waiting_for_report_text = State()  # Ожидание текста жалобы от пользователя
 
