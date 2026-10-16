@@ -19,6 +19,7 @@ except ModuleNotFoundError:
         sys.exit(1)
 
 import secrets
+import sqlite3
 import datetime as dt
 import time
 import mysql.connector
