@@ -1,19 +1,6 @@
-import asyncio
-import logging
-import sqlite3
-import secrets  # Для генерации уникальных токенов диалогов
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import Command, CommandStart
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.fsm.state import StatesGroup, State
-from aiogram.fsm.context import FSMContext
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
 import sys
 import subprocess
-
+import logging
 
 # 🔥 БЛОК АВТО-УСТАНОВКИ: Бот сам установит драйвер MySQL на хостинге
 try:
@@ -32,7 +19,22 @@ except ModuleNotFoundError:
 # Теперь все остальные ваши стандартные импорты могут спокойно идти дальше:
 import datetime as dt
 import time
-# ... и так далее
+
+import asyncio
+import logging
+import sqlite3
+import secrets  # Для генерации уникальных токенов диалогов
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.context import FSMContext
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+
+
 
 
 class ReportStates(StatesGroup):
