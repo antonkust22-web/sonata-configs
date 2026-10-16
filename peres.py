@@ -2,6 +2,7 @@ import sys
 import subprocess
 import logging
 import asyncio
+import aiohttp
 
 # ==========================================
 # 📦 ШАГ 1: АВТО-УСТАНОВКА ДРАЙВЕРА СЕРВЕРА
