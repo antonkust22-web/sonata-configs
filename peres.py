@@ -45,7 +45,7 @@ DB_FILE = "bot_database.db"
 
 MYSQL_HOST = "78.17.152.36"  # Сюда впишите IP вашего VPS (например, "185.12.34.56")
 MYSQL_USER = "sonata_user"
-MYSQL_PASSWORD = "CекретныйПароль"    # Пароль от MySQL, заданный на шаге создания базы
+MYSQL_PASSWORD = "FFtimeSTEP"    # Пароль от MySQL, заданный на шаге создания базы
 MYSQL_DB = "sonata_support"
 
 # Функция подключения ОБЯЗАТЕЛЬНО должна быть объявлена первой в коде!
