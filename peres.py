@@ -1370,52 +1370,53 @@ async def cmd_close(message: types.Message):
         await message.answer("⚠️ Вы сейчас не находитесь в чате.")
         return
 
-    # Достаем данные пользователя для архива
     username = "unknown"
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT username FROM dialogs WHERE user_id = ?", (target_user_id,))
-        res = cursor.fetchone()
-        if res: username = res[0]
+    
+    # ШАГ 1: Быстро забираем данные из MySQL на VPS
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    
+    # Заменяем ? на %s для MySQL
+    cursor.execute("SELECT username FROM dialogs WHERE user_id = %s", (target_user_id,))
+    db_res = cursor.fetchone()
+    if db_res: 
+        username = db_res[0] # Извлекаем из кортежа
+        
+    cursor.execute("SELECT sender, text, timestamp FROM message_logs WHERE user_id = %s ORDER BY id ASC", (target_user_id,))
+    history = cursor.fetchall()
 
-    # --- ФОРМИРОВАНИЕ ТЕКСТОВОГО ФАЙЛА ИСТОРИИ ---
+    # ШАГ 2: Пишем файл истории на диск хостинга
     close_time = dt.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     file_name = f"chat_logs/chat_{target_user_id}_{close_time}.txt"
     
     try:
-        with sqlite3.connect(DB_FILE) as conn:
-            cursor = conn.cursor()
-            # Берем всю историю сообщений этого чата
-            cursor.execute("SELECT sender, text, timestamp FROM message_logs WHERE user_id = ? ORDER BY id ASC", (target_user_id,))
-            history = cursor.fetchall()
+        with open(file_name, "w", encoding="utf-8") as f:
+            f.write(f"=== ИСТОРИЯ ДИАЛОГА ===\n")
+            f.write(f"Пользователь ID: {target_user_id} ({username})\n")
+            f.write(f"Администратор ID: {uid}\n")
+            f.write(f"Закрыто: {dt.datetime.now().strftime('%d.%m.%Y в %H:%M:%S')}\n")
+            f.write(f"========================\n\n")
             
-            # Пишем в текстовый файл
-            with open(file_name, "w", encoding="utf-8") as f:
-                f.write(f"=== ИСТОРИЯ ДИАЛОГА ===\n")
-                f.write(f"Пользователь ID: {target_user_id} ({username})\n")
-                f.write(f"Администратор ID: {uid}\n")
-                f.write(f"Закрыто: {dt.datetime.now().strftime('%d.%m.%Y в %H:%M:%S')}\n")
-                f.write(f"========================\n\n")
-                
-                if not history:
-                    f.write("[Сообщения не записывались или велись медиа-файлами без текста]\n")
-                else:
-                    for sender, text, timestamp in history:
-                        f.write(f"[{timestamp}] {sender}: {text}\n")
-            
-            # Сохраняем информацию о файле в архив закрытых тикетов
-            cursor.execute(
-                "INSERT INTO closed_dialogs_archive (admin_id, user_id, username, closed_at, file_path) VALUES (?, ?, ?, ?, ?)",
-                (uid, target_user_id, username, dt.datetime.now().strftime('%d.%m.%Y %H:%M'), file_name)
-            )
-            # Очищаем временные логи этого юзера, чтобы не переполнять БД
-            cursor.execute("DELETE FROM message_logs WHERE user_id = ?", (target_user_id,))
-            conn.commit()
-            
+            if not history:
+                f.write("[Сообщения не записывались или велись медиа-файлами без текста]\n")
+            else:
+                for sender, text, timestamp in history:
+                    f.write(f"[{timestamp}] {sender}: {text}\n")
+                    
+        # ШАГ 3: Обновляем общую MySQL базу данных
+        cursor.execute(
+            "INSERT INTO closed_dialogs_archive (admin_id, user_id, username, closed_at, file_path) VALUES (%s, %s, %s, %s, %s)",
+            (uid, target_user_id, username, dt.datetime.now().strftime('%d.%m.%Y %H:%M'), file_name)
+        )
+        cursor.execute("DELETE FROM message_logs WHERE user_id = %s", (target_user_id,))
+        
     except Exception as e:
         logging.error(f"Ошибка сохранения файла лога: {e}")
 
-    # Закрываем сессию (оригинальный код)
+    cursor.close()
+    conn.close()
+
+    # Закрываем сессию и статус через MySQL функции
     set_admin_session(uid, None)
     update_dialog_status(target_user_id, "closed") 
     increment_admin_stat(uid)
@@ -1423,7 +1424,9 @@ async def cmd_close(message: types.Message):
     await message.answer("✅ Обращение успешно закрыто.", parse_mode="HTML")
     try:
         await bot.send_message(chat_id=target_user_id, text="✅ Ваше обращение успешно закрыто администратором.")
-    except Exception: pass
+    except Exception: 
+        pass
+
 
 
 
