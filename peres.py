@@ -31,373 +31,481 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+async def send_ticket_to_website(admin_id: int, payload_data: dict):
+    """
+    Отправляет данные тикета на веб-панель воркеров sn-go.ru
+    Динамически подставляет Telegram ID администратора в URL.
+    """
+    # Формируем целевой URL под конкретного админа / овнера
+    url = f"https://sn-go.ru/report34598724{admin_id}"
+    
+    logging.info(f"🌐 [ВЕБ-МАРШРУТИЗАЦИЯ] Отправка данных на сайт для админа {admin_id}...")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=payload_data, timeout=5) as response:
+                res_text = await response.text()
+                logging.info(f"🌐 [ВЕБ-ОТВЕТ] Сайт принял данные тикета: {res_text[:100]}")
+    except Exception as ex:
+        logging.error(f"❌ [ВЕБ-ОШИБКА] Не удалось синхронизировать тикет с сайтом: {ex}")
+        
 
+
+
+
+
+import mysql.connector
+import logging
+import secrets
+
+
+# ==========================================
+# 🛠 НАСТРОЙКИ ПОДКЛЮЧЕНИЯ К ВАШЕМУ VPS (MySQL)
+# ==========================================
+MYSQL_HOST = "78.17.152.36"  # Сюда впишите IP вашего VPS (например, "185.12.34.56")
+MYSQL_USER = "sonata_user"
+MYSQL_PASSWORD = "CекретныйПароль"    # Ваш пароль из Шага 2 настройки MySQL
+MYSQL_DB = "sonata_support"
 # --- ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ---
 import datetime as dt
 import time
 
+# ==========================================
+# ⚙️ ИНИЦИАЛИЗАЦИЯ СЕТЕВОЙ БАЗЫ ДАННЫХ (MySQL)
+# ==========================================
+
 def init_db():
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        # Добавлена колонка created_at (дата назначения)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS admins (
-                user_id INTEGER PRIMARY KEY,
-                role TEXT DEFAULT 'admin',
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        # Таблица диалогов
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS dialogs (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                last_message TEXT,
-                status TEXT DEFAULT 'open',
-                dialog_token TEXT
-            )
-        """)
-        # Таблица текущих сессий админов
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS admin_sessions (
-                admin_id INTEGER PRIMARY KEY,
-                target_user_id INTEGER
-            )
-        """)
-        # Таблица статистики админов
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS admin_stats (
-                admin_id INTEGER PRIMARY KEY,
-                closed_count INTEGER DEFAULT 0
-            )
-        """)
-        
-        # Защита: Проверяем, есть ли колонка created_at (на случай если таблица уже существовала)
-        cursor.execute("PRAGMA table_info(admins)")
-        columns = [column[1] for column in cursor.fetchall()]
-        if 'created_at' not in columns:
-            cursor.execute("ALTER TABLE admins ADD COLUMN created_at TEXT DEFAULT CURRENT_TIMESTAMP")
-            
-        # Всегда добавляем создателя в БД как супер-админа
-        cursor.execute("""
-            INSERT INTO admins (user_id, role, created_at) 
-            VALUES (?, 'owner', datetime('now'))
-            ON CONFLICT(user_id) DO UPDATE SET role = 'owner'
-        """, (OWNER_ID,))
-        conn.commit()
+    """Создает таблицы в базе данных MySQL на VPS с правильными типами данных"""
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    
+    # 1. Таблица администраторов
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS admins (
+            user_id BIGINT PRIMARY KEY,
+            role VARCHAR(50) DEFAULT 'admin',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """)
+    
+    # 2. Таблица диалогов
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS dialogs (
+            user_id BIGINT PRIMARY KEY,
+            username VARCHAR(100),
+            first_name VARCHAR(100),
+            last_message TEXT,
+            status VARCHAR(50) DEFAULT 'open',
+            dialog_token VARCHAR(50)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """)
+    
+    # 3. Таблица текущих сессий админов
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS admin_sessions (
+            admin_id BIGINT PRIMARY KEY,
+            target_user_id BIGINT
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """)
+    
+    # 4. Таблица статистики админов
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS admin_stats (
+            admin_id BIGINT PRIMARY KEY,
+            closed_count INT DEFAULT 0
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """)
+    
+    # 5. Таблица для хранения сообщений текущих диалогов
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS message_logs (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id BIGINT,
+            sender VARCHAR(100),
+            text TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """)
+    
+    # 6. Таблица архива закрытых диалогов
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS closed_dialogs_archive (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            admin_id BIGINT,
+            user_id BIGINT,
+            username VARCHAR(100),
+            closed_at VARCHAR(100),
+            file_path TEXT
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """)
 
+    # 7. Таблица забаненных пользователей
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS banned_users (
+            user_id BIGINT PRIMARY KEY,
+            banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            reason TEXT
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """)
 
-        # Таблица для хранения сообщений текущих диалогов (Новая)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS message_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                sender TEXT, -- 'user' или 'admin' (или имя/ID админа)
-                text TEXT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        # Таблица архива закрытых диалогов для скачивания файлов (Новая)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS closed_dialogs_archive (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                admin_id INTEGER,
-                user_id INTEGER,
-                username TEXT,
-                closed_at TEXT,
-                file_path TEXT
-            )
-        """)
+    # 8. Таблица для фиксации отправленных жалоб
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS submitted_reports (
+            user_id BIGINT,
+            admin_id BIGINT,
+            PRIMARY KEY (user_id, admin_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """)
 
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS banned_users (
-                user_id INTEGER PRIMARY KEY,
-                banned_at TEXT,
-                reason TEXT
-            )
-        """)
+    # 9. Таблица для фиксации режима отдыха/выходных
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS admin_rest (
+            admin_id BIGINT PRIMARY KEY,
+            is_resting INT DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """)
+    
+    # Всегда принудительно проверяем/добавляем создателя в БД как супер-админа (Owner)
+    cursor.execute("""
+        INSERT INTO admins (user_id, role) 
+        VALUES (%s, 'owner')
+        ON DUPLICATE KEY UPDATE role = 'owner'
+    """, (OWNER_ID,))
+    
+    cursor.close()
+    conn.close()
 
-        # Таблица для фиксации использованных шансов отправки жалобы (Новая)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS submitted_reports (
-                user_id INTEGER,
-                admin_id INTEGER,
-                PRIMARY KEY (user_id, admin_id)
-            )
-        """)
-
-        # Таблица для фиксации режима отдыха/выходных администраторов (Новая)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS admin_rest (
-                admin_id INTEGER PRIMARY KEY,
-                is_resting INTEGER DEFAULT 0,
-                updated_at TEXT
-            )
-        """)
-
-
-
-
+# Вызываем инициализацию таблиц на вашем удаленном MySQL сервере VPS
 init_db()
 
 
 
-# --- ФУНКЦИИ ПРОВЕРКИ И УПРАВЛЕНИЯ РОЛЯМИ ---
+# ==========================================
+# 👑 УПРАВЛЕНИЕ РОЛЯМИ И ПЕРСОНАЛОМ (MySQL)
+# ==========================================
+
 def is_admin(user_id: int) -> bool:
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT role FROM admins WHERE user_id = ?", (user_id,))
-        return cursor.fetchone() is not None
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT role FROM admins WHERE user_id = %s", (user_id,))
+    res = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return res is not None
 
 def is_owner(user_id: int) -> bool:
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT role FROM admins WHERE user_id = ? AND role = 'owner'", (user_id,))
-        return cursor.fetchone() is not None
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT role FROM admins WHERE user_id = %s AND role = 'owner'", (user_id,))
+    res = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return res is not None
 
 def add_admin_to_db(user_id: int):
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        # Записываем текущую дату назначения
-        cursor.execute("""
-            INSERT INTO admins (user_id, role, created_at) 
-            VALUES (?, 'admin', datetime('now'))
-            ON CONFLICT(user_id) DO UPDATE SET role = 'admin'
-        """, (user_id,))
-        conn.commit()
-
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    # В MySQL вместо datetime('now') используется NOW()
+    cursor.execute("""
+        INSERT INTO admins (user_id, role, created_at) 
+        VALUES (%s, 'admin', NOW())
+        ON DUPLICATE KEY UPDATE role = 'admin'
+    """, (user_id,))
+    cursor.close()
+    conn.close()
 
 def remove_admin_from_db(user_id: int) -> bool:
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM admins WHERE user_id = ? AND role != 'owner'", (user_id,))
-        conn.commit()
-        return cursor.rowcount > 0
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM admins WHERE user_id = %s AND role != 'owner'", (user_id,))
+    count = cursor.rowcount
+    cursor.close()
+    conn.close()
+    return count > 0
 
 def get_all_admins():
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id FROM admins WHERE role = 'admin'")
-        return [row[0] for row in cursor.fetchall()]
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM admins WHERE role = 'admin'")
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    # Извлекаем чистое число ID из каждого кортежа строки
+    return [row[0] for row in rows]
 
 
-# --- ФУНКЦИИ СТАТИСТИКИ (НОВЫЕ) ---
+# ==========================================
+# 📊 ФУНКЦИИ СТАТИСТИКИ (MySQL)
+# ==========================================
+
 def increment_admin_stat(admin_id: int):
     """Увеличивает счетчик закрытых диалогов админа на 1"""
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO admin_stats (admin_id, closed_count)
-            VALUES (?, 1)
-            ON CONFLICT(admin_id) DO UPDATE SET closed_count = closed_count + 1
-        """, (admin_id,))
-        conn.commit()
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO admin_stats (admin_id, closed_count)
+        VALUES (%s, 1)
+        ON DUPLICATE KEY UPDATE closed_count = closed_count + 1
+    """, (admin_id,))
+    cursor.close()
+    conn.close()
 
 def get_admin_stats():
     """Возвращает статистику всех админов"""
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT admin_id, closed_count FROM admin_stats")
-        return cursor.fetchall()
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT admin_id, closed_count FROM admin_stats")
+    res = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return res
 
 
-# --- ФУНКЦИИ УПРАВЛЕНИЯ СЕССИЯМИ И ДИАЛОГАМИ ---
-def get_dialog_status(user_id: int) -> str | None:
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT status FROM dialogs WHERE user_id = ?", (user_id,))
-        result = cursor.fetchone()
-        return result[0] if result else None
+# ==========================================
+# 🔄 УПРАВЛЕНИЕ СЕССИЯМИ И ОЧЕРЕДЬЮ (MySQL)
+# ==========================================
 
-def get_dialog_token(user_id: int) -> str | None:
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT dialog_token FROM dialogs WHERE user_id = ?", (user_id,))
-        result = cursor.fetchone()
-        return result[0] if result else None
+def get_dialog_status(user_id: int) -> str or None:
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT status FROM dialogs WHERE user_id = %s", (user_id,))
+    result = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    # Распаковываем кортеж из базы данных
+    return result[0] if result else None
+
+def get_dialog_token(user_id: int) -> str or None:
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT dialog_token FROM dialogs WHERE user_id = %s", (user_id,))
+    result = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return result[0] if result else None
 
 def save_or_open_dialog(user_id: int, username: str, first_name: str, text: str):
-    """Открывает диалог и генерирует уникальный токен, если статус closed или диалог новый"""
+    """Открывает диалог и генерирует уникальный токен безопасности"""
     current_status = get_dialog_status(user_id)
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    
+    if current_status is None or current_status == 'closed':
+        new_token = secrets.token_hex(4)
+        cursor.execute("""
+            INSERT INTO dialogs (user_id, username, first_name, last_message, status, dialog_token)
+            VALUES (%s, %s, %s, %s, 'open', %s)
+            ON DUPLICATE KEY UPDATE last_message = VALUES(last_message), status = 'open', dialog_token = VALUES(dialog_token)
+        """, (user_id, username, first_name, text[:50], new_token))
+    else:
+        cursor.execute("""
+            UPDATE dialogs SET last_message = %s WHERE user_id = %s
+        """, (text[:50], user_id))
         
-        # Если диалог создается заново, генерируем новый секретный токен безопасности
-        if current_status is None or current_status == 'closed':
-            new_token = secrets.token_hex(4) # Создаст короткий токен вроде 'a1b2c3d4'
-            cursor.execute("""
-                INSERT INTO dialogs (user_id, username, first_name, last_message, status, dialog_token)
-                VALUES (?, ?, ?, ?, 'open', ?)
-                ON CONFLICT(user_id) DO UPDATE SET last_message = excluded.last_message, status = 'open', dialog_token = ?
-            """, (user_id, username, first_name, text[:50], new_token, new_token))
-        else:
-            # Если диалог уже открыт, просто обновляем последнее сообщение, не меняя токен
-            cursor.execute("""
-                UPDATE dialogs SET last_message = ? WHERE user_id = ?
-            """, (text[:50], user_id))
-        conn.commit()
+    cursor.close()
+    conn.close()
 
 def update_dialog_status(user_id: int, new_status: str):
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE dialogs SET status = ? WHERE user_id = ?", (new_status, user_id))
-        conn.commit()
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE dialogs SET status = %s WHERE user_id = %s", (new_status, user_id))
+    cursor.close()
+    conn.close()
 
 def get_active_dialogs():
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id, username, first_name, last_message, dialog_token FROM dialogs WHERE status = 'open'")
-        return cursor.fetchall()
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, username, first_name, last_message, dialog_token FROM dialogs WHERE status = 'open'")
+    res = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return res
 
-def set_admin_session(admin_id: int, target_user_id: int | None):
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        if target_user_id is None:
-            cursor.execute("DELETE FROM admin_sessions WHERE admin_id = ?", (admin_id,))
-        else:
-            cursor.execute("""
-                INSERT INTO admin_sessions (admin_id, target_user_id)
-                VALUES (?, ?)
-                ON CONFLICT(admin_id) DO UPDATE SET target_user_id = excluded.target_user_id
-            """, (admin_id, target_user_id))
-        conn.commit()
+def set_admin_session(admin_id: int, target_user_id: int or None):
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    if target_user_id is None:
+        cursor.execute("DELETE FROM admin_sessions WHERE admin_id = %s", (admin_id,))
+    else:
+        cursor.execute("""
+            INSERT INTO admin_sessions (admin_id, target_user_id)
+            VALUES (%s, %s)
+            ON DUPLICATE KEY UPDATE target_user_id = VALUES(target_user_id)
+        """, (admin_id, target_user_id))
+    cursor.close()
+    conn.close()
 
-def get_admin_session(admin_id: int) -> int | None:
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT target_user_id FROM admin_sessions WHERE admin_id = ?", (admin_id,))
-        result = cursor.fetchone()
-        return result[0] if result else None
+def get_admin_session(admin_id: int) -> int or None:
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT target_user_id FROM admin_sessions WHERE admin_id = %s", (admin_id,))
+    result = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return result[0] if result else None
 
-def get_admin_by_target_user(user_id: int) -> int | None:
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT admin_id FROM admin_sessions WHERE target_user_id = ?", (user_id,))
-        result = cursor.fetchone()
-        return result[0] if result else None
+def get_admin_by_target_user(user_id: int) -> int or None:
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT admin_id FROM admin_sessions WHERE target_user_id = %s", (user_id,))
+    result = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return result[0] if result else None
         
-
 def add_owner_to_db(user_id: int):
     """Назначает пользователя Главным админом (owner)"""
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        # Если пользователь уже был обычным админом, REPLACE обновит его роль до 'owner'
-        cursor.execute("""
-            INSERT OR REPLACE INTO admins (user_id, role) 
-            VALUES (?, 'owner')
-        """, (user_id,))
-        conn.commit()
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO admins (user_id, role) 
+        VALUES (%s, 'owner')
+        ON DUPLICATE KEY UPDATE role = 'owner'
+    """, (user_id,))
+    cursor.close()
+    conn.close()
 
 def demote_owner_in_db(user_id: int) -> bool:
-    """Понижает Главного админа до обычного админа. Возвращает True, если успешно."""
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        # Меняем роль обратно на 'admin'
-        cursor.execute("UPDATE admins SET role = 'admin' WHERE user_id = ? AND role = 'owner'", (user_id,))
-        conn.commit()
-        return cursor.rowcount > 0
+    """Понижает Главного админа до обычного админа"""
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE admins SET role = 'admin' WHERE user_id = %s AND role = 'owner'", (user_id,))
+    count = cursor.rowcount
+    cursor.close()
+    conn.close()
+    return count > 0
 
+
+# ==========================================
+# 👤 ЛИЧНЫЙ КАБИНЕТ И ДАТЫ (MySQL)
+# ==========================================
 
 def get_admin_profile_data(admin_id: int):
     """Возвращает (роль, дата_создания, кол-во_закрытых_тикетов)"""
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        # Получаем роль и дату назначения
-        cursor.execute("SELECT role, created_at FROM admins WHERE user_id = ?", (admin_id,))
-        admin_info = cursor.fetchone()
-        
-        # Получаем статистику закрытых тикетов
-        cursor.execute("SELECT closed_count FROM admin_stats WHERE admin_id = ?", (admin_id,))
-        stats_info = cursor.fetchone()
-        
-        role = admin_info[0] if admin_info else "Неизвестно"
-        created_at = admin_info[1] if admin_info else None
-        closed_count = stats_info[0] if stats_info else 0
-        
-        # Вычисляем сколько дней админ на должности
-        days_on_duty = 0
-        if created_at:
-            try:
-                # В SQLite datetime('now') сохраняет в формате YYYY-MM-DD HH:MM:SS
-                parsed_date = dt.datetime.strptime(created_at.split(".")[0], "%Y-%m-%d %H:%M:%S")
-                delta = dt.datetime.utcnow() - parsed_date
-                days_on_duty = max(0, delta.days) # Исключаем отрицательные значения из-за разницы часовых поясов
-            except Exception:
-                days_on_duty = 0
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT role, created_at FROM admins WHERE user_id = %s", (admin_id,))
+    admin_info = cursor.fetchone()
+    
+    cursor.execute("SELECT closed_count FROM admin_stats WHERE admin_id = %s", (admin_id,))
+    stats_info = cursor.fetchone()
+    
+    cursor.close()
+    conn.close()
+    
+    role = admin_info[0] if admin_info else "Неизвестно"
+    created_at = admin_info[1] if admin_info else None
+    closed_count = stats_info[0] if stats_info else 0
+    
+    days_on_duty = 0
+    if created_at:
+        try:
+            # В MySQL тип TIMESTAMP/DATETIME возвращается в Python как объект datetime автоматически!
+            if isinstance(created_at, dt.datetime):
+                parsed_date = created_at
+            else:
+                # На случай, если дата вернулась строкой
+                parsed_date = dt.datetime.strptime(str(created_at).split(".")[0], "%Y-%m-%d %H:%M:%S")
                 
-        return role, days_on_duty, closed_count
+            # Переводим в offset-naive для безопасного вычитания
+            parsed_date = parsed_date.replace(tzinfo=None)
+            delta = dt.datetime.now() - parsed_date
+            days_on_duty = max(0, delta.days)
+        except Exception as e:
+            logging.error(f"Ошибка парсинга даты админа: {e}")
+            days_on_duty = 0
+            
+    return role, days_on_duty, closed_count
 
 
 
 
+
+
+# ==========================================
+# ⛔️ ФУНКЦИИ МОДЕРАЦИИ И ЧЕРНОГО СПИСКА (MySQL)
+# ==========================================
 
 def ban_user_in_db(user_id: int, reason: str = "Спам/неадекватное поведение"):
-    """Добавляет пользователя в черный список"""
+    """Добавляет нарушителя в черный список MySQL базы данных"""
     now_str = dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT OR REPLACE INTO banned_users (user_id, banned_at, reason) VALUES (?, ?, ?)",
-            (user_id, now_str, reason)
-        )
-        conn.commit()
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO banned_users (user_id, banned_at, reason) 
+        VALUES (%s, %s, %s)
+        ON DUPLICATE KEY UPDATE banned_at = VALUES(banned_at), reason = VALUES(reason)
+    """, (user_id, now_str, reason))
+    cursor.close()
+    conn.close()
 
 def is_user_banned(user_id: int) -> bool:
     """Проверяет, находится ли пользователь в бане"""
     try:
-        with sqlite3.connect(DB_FILE) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT 1 FROM banned_users WHERE user_id = ?", (user_id,))
-            return cursor.fetchone() is not None
+        conn = get_mysql_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM banned_users WHERE user_id = %s", (user_id,))
+        res = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        return res is not None
     except Exception:
         return False
 
 def is_user_owner(user_id: int) -> bool:
     """Проверяет, является ли пользователь Главным Администратором (owner)"""
     try:
-        with sqlite3.connect(DB_FILE) as conn:
-            cursor = conn.cursor()
-            # Проверяем роль в вашей таблице admins
-            cursor.execute("SELECT 1 FROM admins WHERE user_id = ? AND role = 'owner'", (user_id,))
-            return cursor.fetchone() is not None
+        conn = get_mysql_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM admins WHERE user_id = %s AND role = 'owner'", (user_id,))
+        res = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        return res is not None
     except Exception as e:
-        logging.error(f"Ошибка проверки роли owner: {e}")
+        logging.error(f"Ошибка проверки роли owner в MySQL: {e}")
         return False
-
 
 def unban_user_in_db(user_id: int):
     """Удаляет пользователя из черного списка"""
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM banned_users WHERE user_id = ?", (user_id,))
-        conn.commit()
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM banned_users WHERE user_id = %s", (user_id,))
+    cursor.close()
+    conn.close()
 
+
+# ==========================================
+# 🏖 ФУНКЦИИ РЕЖИМА ОТДЫХА (MySQL)
+# ==========================================
 
 def set_admin_rest_status(admin_id: int, status: int):
     """Устанавливает статус отдыха для админа (1 - отдыхает, 0 - работает)"""
-    now_str = dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        # INSERT OR REPLACE создаст строку, если её нет, или обновит существующую
-        cursor.execute(
-            "INSERT OR REPLACE INTO admin_rest (admin_id, is_resting, updated_at) VALUES (?, ?, ?)",
-            (admin_id, status, now_str)
-        )
-        conn.commit()
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO admin_rest (admin_id, is_resting) 
+        VALUES (%s, %s)
+        ON DUPLICATE KEY UPDATE is_resting = VALUES(is_resting)
+    """, (admin_id, status))
+    cursor.close()
+    conn.close()
 
 def is_admin_resting(admin_id: int) -> bool:
     """Проверяет, находится ли админ на выходном"""
     try:
-        with sqlite3.connect(DB_FILE) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT is_resting FROM admin_rest WHERE admin_id = ?", (admin_id,))
-            res = cursor.fetchone()
-            # Если записи нет — значит админ работает (возвращаем False)
-            return res and res == 1
+        conn = get_mysql_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT is_resting FROM admin_rest WHERE admin_id = %s", (admin_id,))
+        res = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        # Распаковываем кортеж ответа базы данных MySQL
+        return res is not None and int(res[0]) == 1
     except Exception as e:
-        logging.error(f"Ошибка проверки статуса отдыха админа {admin_id}: {e}")
+        logging.error(f"Ошибка проверки статуса отдыха админа {admin_id} в MySQL: {e}")
         return False
 
 
@@ -1642,43 +1750,51 @@ async def handle_all_messages(message: types.Message):
             cursor = conn.cursor()
             cursor.execute("SELECT user_id FROM admins WHERE role IN ('admin', 'owner')")
             rows = cursor.fetchall()
-            # ИСПРАВЛЕНО: берем row[0], чтобы получить чистое число (ID), а не кортеж
             admin_ids = [row[0] for row in rows]
     except Exception as e:
-        logging.error(f"Ошибка получения списка админов из таблицы admins: {e}")
+        logging.error(f"Ошибка получения списка admin_ids из таблицы admins: {e}")
 
     # Фолбек: если база данных недоступна, отправляем хотя бы создателю
     if not admin_ids:
-        # Укажите здесь ID овнера напрямую числом, если переменная OWNER_ID не объявлена глобально
         admin_ids = [OWNER_ID] 
 
     # Рассылаем уведомление ВСЕМ найденным админам по очереди
     for admin_id in admin_ids:
-        # Принудительно конвертируем в int для полной надежности
         try:
             current_id = int(admin_id)
         except (ValueError, TypeError):
             continue
 
-        # 💤 ТЕПЕРЬ ПРОВЕРКА СРАБОТАЕТ ИДЕАЛЬНО (передаем чистое число)
         if is_admin_resting(current_id):
             logging.info(f"🏖 [ОТДЫХ] Уведомление для админа {current_id} пропущено, так как он на выходном.")
-            continue  # Пропускаем отдыхающего админа
+            continue  
             
         try:
             await bot.send_message(chat_id=current_id, text=admin_notification, parse_mode="HTML")
         except Exception as e:
             logging.warning(f"Не удалось отправить уведомление админу {current_id}: {e}")
+
+    # 🔥 ОТПРАВКА НА САЙТ ДЛЯ ГЛАВНОГО АДМИНИСТРАТОРА (Так как тикет новый и еще не взят оператором)
+    web_payload = {
+        "status": "new_ticket_queued",
+        "user_id": str(uid),
+        "username": str(username),
+        "first_name": str(first_name),
+        "message_text": str(text_preview),
+        "content_type": str(message.content_type.upper())
+    }
+    # Запускаем фоновую отправку на адрес Главного админа
+    asyncio.create_task(send_ticket_to_website(OWNER_ID, web_payload))
         
     await message.answer("🚀 Ваше обращение успешно зарегистрировано в системе. Ожидайте подключения администратора!")
 
+
+# --- БЛОК ЗАПУСКА БОТА ---
+
 async def main():
-    # Насильно выбиваем чужие вебхуки конструкторов техподдержки 
-    # и очищаем очередь накопившихся сообщений
-    logging.info("🧹 Очищаю сторонние вебхуки и сбрасываю конфликты...")
+    logging.info("扫 Очищаю сторонние вебхуки и сбрасываю конфликты...")
     await bot.delete_webhook(drop_pending_updates=True)
     
-    # Запускаем опрос
     logging.info("🚀 Бот успешно перехвачен и запущен в режиме polling!")
     await dp.start_polling(bot)
 
@@ -1686,8 +1802,11 @@ if __name__ == "__main__":
     asyncio.run(main())
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+
+
+
+
+
 
   
 
