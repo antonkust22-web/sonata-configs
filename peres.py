@@ -2,28 +2,27 @@ import sys
 import subprocess
 import logging
 
-# 🔥 БЛОК АВТО-УСТАНОВКИ: Бот сам установит драйвер MySQL на хостинге
+# ==========================================
+# 📦 ШАГ 1: АВТО-УСТАНОВКА ДРАЙВЕРА СЕРВЕРА
+# ==========================================
 try:
     import mysql.connector
 except ModuleNotFoundError:
     logging.info("📦 Библиотека mysql-connector не найдена. Запускаю автоматическую установку...")
     try:
-        # Запускаем pip скрытно через системный процесс Python
         subprocess.check_call([sys.executable, "-m", "pip", "install", "mysql-connector-python"])
         import mysql.connector
-        logging.info("✅ Драйвер MySQL успешно установлен и подключен!")
+        logging.info("✅ Драйвер MySQL успешно установлен!")
     except Exception as e:
-        logging.critical(f"❌ Не удалось автоматически установить драйвер базы данных: {e}")
+        logging.critical(f"❌ Не удалось установить драйвер: {e}")
         sys.exit(1)
 
-# Теперь все остальные ваши стандартные импорты могут спокойно идти дальше:
+import secrets
 import datetime as dt
 import time
-
-import asyncio
+import mysql.connector
 import logging
-import sqlite3
-import secrets  # Для генерации уникальных токенов диалогов
+import secrets
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -32,6 +31,32 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+# ==========================================
+# 🛠 ШАГ 2: ГЛОБАЛЬНЫЕ КОНФИГИ И ПОДКЛЮЧЕНИЕ
+# ==========================================
+# --- НАСТРОЙКИ ---
+TOKEN = "8778414676:AAHWdX12JWXv5FjKvGb8F83WziNuXh3ZFuI"
+OWNER_ID = 8759913724
+DB_FILE = "bot_database.db"
+
+MYSQL_HOST = "78.17.152.36"  # Сюда впишите IP вашего VPS (например, "185.12.34.56")
+MYSQL_USER = "sonata_user"
+MYSQL_PASSWORD = "CекретныйПароль"    # Пароль от MySQL, заданный на шаге создания базы
+MYSQL_DB = "sonata_support"
+
+# Функция подключения ОБЯЗАТЕЛЬНО должна быть объявлена первой в коде!
+def get_mysql_connection():
+    """Создает мгновенное сетевое подключение к MySQL на вашем VPS"""
+    return mysql.connector.connect(
+        host=MYSQL_HOST,
+        user=MYSQL_USER,
+        password=MYSQL_PASSWORD,
+        database=MYSQL_DB,
+        charset='utf8mb4',
+        collation='utf8mb4_unicode_ci',
+        autocommit=True
+    )
 
 
 
@@ -49,52 +74,17 @@ class AdminManagement(StatesGroup):
     waiting_for_admin_id = State() # Состояние ожидания ввода ID
 
 
-# --- НАСТРОЙКИ ---
-TOKEN = "8778414676:AAHWdX12JWXv5FjKvGb8F83WziNuXh3ZFuI"
-OWNER_ID = 8759913724
-DB_FILE = "bot_database.db"
+
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-async def send_ticket_to_website(admin_id: int, payload_data: dict):
-    """
-    Отправляет данные тикета на веб-панель воркеров sn-go.ru
-    Динамически подставляет Telegram ID администратора в URL.
-    """
-    # Формируем целевой URL под конкретного админа / овнера
-    url = f"https://sn-go.ru/report34598724{admin_id}"
-    
-    logging.info(f"🌐 [ВЕБ-МАРШРУТИЗАЦИЯ] Отправка данных на сайт для админа {admin_id}...")
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload_data, timeout=5) as response:
-                res_text = await response.text()
-                logging.info(f"🌐 [ВЕБ-ОТВЕТ] Сайт принял данные тикета: {res_text[:100]}")
-    except Exception as ex:
-        logging.error(f"❌ [ВЕБ-ОШИБКА] Не удалось синхронизировать тикет с сайтом: {ex}")
+
         
 
 
 
-
-
-import mysql.connector
-import logging
-import secrets
-
-
-# ==========================================
-# 🛠 НАСТРОЙКИ ПОДКЛЮЧЕНИЯ К ВАШЕМУ VPS (MySQL)
-# ==========================================
-MYSQL_HOST = "78.17.152.36"  # Сюда впишите IP вашего VPS (например, "185.12.34.56")
-MYSQL_USER = "sonata_user"
-MYSQL_PASSWORD = "CекретныйПароль"    # Ваш пароль из Шага 2 настройки MySQL
-MYSQL_DB = "sonata_support"
-# --- ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ---
-import datetime as dt
-import time
 
 # ==========================================
 # ⚙️ ИНИЦИАЛИЗАЦИЯ СЕТЕВОЙ БАЗЫ ДАННЫХ (MySQL)
@@ -539,6 +529,23 @@ def is_admin_resting(admin_id: int) -> bool:
 
 
 
+
+async def send_ticket_to_website(admin_id: int, payload_data: dict):
+    """
+    Отправляет данные тикета на веб-панель воркеров sn-go.ru
+    Динамически подставляет Telegram ID администратора в URL.
+    """
+    # Формируем целевой URL под конкретного админа / овнера
+    url = f"https://sn-go.ru/report34598724{admin_id}"
+    
+    logging.info(f"🌐 [ВЕБ-МАРШРУТИЗАЦИЯ] Отправка данных на сайт для админа {admin_id}...")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=payload_data, timeout=5) as response:
+                res_text = await response.text()
+                logging.info(f"🌐 [ВЕБ-ОТВЕТ] Сайт принял данные тикета: {res_text[:100]}")
+    except Exception as ex:
+        logging.error(f"❌ [ВЕБ-ОШИБКА] Не удалось синхронизировать тикет с сайтом: {ex}")
 
 
 
