@@ -1726,25 +1726,34 @@ async def handle_all_messages(message: types.Message):
 
     # 1. Если админ или сайт уже зашли в чат и общаются ('chatting')
     if status == "chatting":
-        active_admin_id = get_admin_by_target_user(uid)
         text_to_log = message.text if message.text else f"[{message.content_type.upper()}]"
         
+        # Сразу сохраняем сообщение пользователя в MySQL (сайт его тут же отобразит)
         conn = get_mysql_connection()
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO message_logs (user_id, sender, text) VALUES (%s, %s, %s)",
             (uid, "Пользователь", text_to_log)
         )
+        
+        # Проверяем, привязан ли к чату конкретный админ в Telegram
+        cursor.execute("SELECT admin_id FROM admin_sessions WHERE target_user_id = %s", (uid,))
+        res = cursor.fetchone()
+        active_admin_id = res[0] if res else None
+        
         cursor.close()
         conn.close()
 
-        # Если чат перехвачен админом внутри Telegram — дублируем ему на экран
+        # Если админ общается из Telegram — дублируем ему на экран
         if active_admin_id:
             try:
                 await message.copy_to(chat_id=active_admin_id)
             except Exception:
                 pass
+        # Если active_admin_id равен None, значит админ сидит на сайте. 
+        # Ошибку пользователю больше НЕ выводим, сообщение уже успешно ушло на сайт!
         return
+
 
     # 2. Если диалог уже создан, но оператор еще не ответил ('open')
     if status == "open":
