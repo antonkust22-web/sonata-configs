@@ -513,7 +513,7 @@ def set_admin_rest_status(admin_id: int, status: int):
     conn.close()
 
 def is_admin_resting(admin_id: int) -> bool:
-    """Проверяет, находится ли админ на выходном"""
+    """Проверяет статус отдыха администратора в сетевой MySQL базе данных"""
     try:
         conn = get_mysql_connection()
         cursor = conn.cursor()
@@ -521,12 +521,11 @@ def is_admin_resting(admin_id: int) -> bool:
         res = cursor.fetchone()
         cursor.close()
         conn.close()
-        
-        # Распаковываем кортеж ответа базы данных MySQL
         return res is not None and int(res[0]) == 1
     except Exception as e:
-        logging.error(f"Ошибка проверки статуса отдыха админа {admin_id} в MySQL: {e}")
+        logging.error(f"Ошибка проверки статуса отдыха в MySQL: {e}")
         return False
+
 
 
 
