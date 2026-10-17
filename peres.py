@@ -555,34 +555,28 @@ async def send_ticket_to_website(admin_id: int, payload_data: dict):
 
 # --- КЛАВИАТУРЫ ---
 def get_user_start_kb(user_id: int):
+    """Исправленная клавиатура старта: полностью переведена на MySQL"""
     builder = InlineKeyboardBuilder()
     builder.button(text="✍️ Написать в тех. поддержку", callback_data="contact_support")
     builder.button(text="❓ Часто задаваемые вопросы (FAQ)", callback_data="faq_menu")
     
     try:
-        with sqlite3.connect(DB_FILE) as conn:
-            cursor = conn.cursor()
-            # 1. Находим последний закрытый тикет пользователя
-            cursor.execute("SELECT admin_id FROM closed_dialogs_archive WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user_id,))
-            res = cursor.fetchone()
+        conn = get_mysql_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT admin_id FROM closed_dialogs_archive WHERE user_id = %s ORDER BY id DESC LIMIT 1", (user_id,))
+        res = cursor.fetchone()
+        
+        if res:
+            last_admin_id = res[0]
+            cursor.execute("SELECT 1 FROM submitted_reports WHERE user_id = %s AND admin_id = %s", (user_id, last_admin_id))
+            already_reported = cursor.fetchone() is not None
             
-            if res:
-                last_admin_id = res[0]
-                
-                # 2. Проверяем, отправлялась ли жалоба
-                already_reported = False
-                try:
-                    cursor.execute("SELECT 1 FROM submitted_reports WHERE user_id = ? AND admin_id = ?", (user_id, last_admin_id))
-                    already_reported = cursor.fetchone() is not None
-                except sqlite3.OperationalError:
-                    # Если таблицы еще нет, считаем, что жалоб не было
-                    already_reported = False
-                
-                # Показываем кнопку, если жалоба еще не подавалась
-                if not already_reported:
-                    builder.button(text="⚠️ Пожаловаться на прошлый ответ", callback_data="report_last_admin")
+            if not already_reported:
+                builder.button(text="⚠️ Пожаловаться на прошлый ответ", callback_data="report_last_admin")
+        cursor.close()
+        conn.close()
     except Exception as e:
-        logging.error(f"Ошибка генерации клавиатуры старта: {e}")
+        logging.error(f"Ошибка генерации клавиатуры старта в MySQL: {e}")
         
     builder.adjust(1)
     return builder.as_markup()
@@ -683,34 +677,30 @@ async def faq_menu_callback(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "report_last_admin")
 async def report_last_admin_callback(callback: types.CallbackQuery, state: FSMContext):
     uid = callback.from_user.id
-        
-    # 1. Находим последнего админа
     last_admin_id = None
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT admin_id FROM closed_dialogs_archive WHERE user_id = ? ORDER BY id DESC LIMIT 1", (uid,))
-        res = cursor.fetchone()
-        if res:
-            # ИСПРАВЛЕНО: берем значение из кортежа
-            last_admin_id = res[0]
+    
+    # Ищем в MySQL
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT admin_id FROM closed_dialogs_archive WHERE user_id = %s ORDER BY id DESC LIMIT 1", (uid,))
+    res = cursor.fetchone()
+    if res:
+        last_admin_id = res[0]
             
     if not last_admin_id:
-        await callback.answer("❌ История ваших обращений не найдена. Вам еще никто не отвечал.", show_alert=True)
+        cursor.close()
+        conn.close()
+        await callback.answer("❌ История ваших обращений не найдена.", show_alert=True)
         return
         
-    # 2. Проверяем таблицу поданных жалоб с защитой от ошибок
-    already_reported = False
-    try:
-        with sqlite3.connect(DB_FILE) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT 1 FROM submitted_reports WHERE user_id = ? AND admin_id = ?", (uid, last_admin_id))
-            already_reported = cursor.fetchone() is not None
-    except sqlite3.OperationalError:
-        already_reported = False # Если таблицы нет, пропускаем проверку лимита
-
+    # Проверяем дубликаты жалоб в MySQL
+    cursor.execute("SELECT 1 FROM submitted_reports WHERE user_id = %s AND admin_id = %s", (uid, last_admin_id))
+    already_reported = cursor.fetchone() is not None
+    cursor.close()
+    conn.close()
         
     if already_reported:
-        await callback.answer("❌ Вы уже использовали свой единственный шанс отправить жалобу по этому обращению.", show_alert=True)
+        await callback.answer("❌ Вы уже отправили жалобу по этому обращению.", show_alert=True)
         return
 
     await callback.answer()
@@ -721,12 +711,60 @@ async def report_last_admin_callback(callback: types.CallbackQuery, state: FSMCo
         "Пожалуйста, напишите в одном сообщении, с чем именно вы не согласны.\n\n"
         "<i>Вводите текст обдуманно.</i>"
     )
-    
-    back_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="back")]
-    ])
-    
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="back")]])
     await callback.message.answer(text, reply_markup=back_kb, parse_mode="HTML")
+
+
+@dp.message(ReportStates.waiting_for_report_text, F.text)
+async def handle_report_text(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    report_text = message.text
+    await state.clear()
+    
+    last_admin_id = None
+    chat_file_path = None
+    
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT admin_id, file_path FROM closed_dialogs_archive WHERE user_id = %s ORDER BY id DESC LIMIT 1", (user_id,))
+    res = cursor.fetchone()
+    if res:
+        last_admin_id, chat_file_path = res[0], res[1]
+
+    if not last_admin_id:
+        cursor.close()
+        conn.close()
+        await message.answer("❌ Ошибка поиска администратора.")
+        return
+
+    # Регистрируем жалобу (Аналог INSERT OR IGNORE для MySQL)
+    cursor.execute("INSERT IGNORE INTO submitted_reports (user_id, admin_id) VALUES (%s, %s)", (user_id, last_admin_id))
+    
+    # Находим овнера
+    cursor.execute("SELECT user_id FROM admins WHERE role = 'owner' LIMIT 1")
+    owner_res = cursor.fetchone()
+    owner_id = owner_res[0] if owner_res else 8759913724
+    
+    cursor.close()
+    conn.close()
+
+    owner_msg_text = (
+        f"🚨 <b>ПОСТУПИЛА НОВАЯ ЖАЛОБА НА АДМИНА!</b>\n\n"
+        f"👤 <b>Отправитель:</b> {message.from_user.mention_html()} (ID: <code>{user_id}</code>)\n"
+        f"👮‍♂️ <b>На кого жалоба:</b> Администратор ID <code>{last_admin_id}</code>\n\n"
+        f"📝 <b>Текст жалобы:</b>\n<i>{report_text}</i>"
+    )
+
+    try:
+        if chat_file_path and os.path.exists(chat_file_path):
+            await bot.send_document(chat_id=owner_id, document=types.FSInputFile(chat_file_path), caption=owner_msg_text, parse_mode="HTML")
+        else:
+            await bot.send_message(chat_id=owner_id, text=owner_msg_text, parse_mode="HTML")
+            
+        await message.answer("✅ <b>Ваша жалоба успешно отправлена Овнеру!</b>", reply_markup=get_user_start_kb(user_id), parse_mode="HTML")
+    except Exception:
+        await message.answer("⚠️ Произошла ошибка при доставке вашей жалобы.")
+
 
 
 
@@ -1115,8 +1153,8 @@ async def handle_report_text(message: types.Message, state: FSMContext):
 
 
 @dp.callback_query(F.data.startswith("fire_adm_"))
-async def fire_admin_callback(callback: types.CallbackQuery):
-    """Обработка клика по кнопке '❌ Снять'"""
+async def fire_admin_callback(callback: types.CallbackQuery, state: FSMContext):
+    """Обработка клика по кнопке '❌ Снять' (ИСПРАВЛЕНА ПЕРЕДАЧА STATE)"""
     uid = callback.from_user.id
     if not is_owner(uid):
         await callback.answer("⚠️ Отказано в доступе.", show_alert=True)
@@ -1126,27 +1164,20 @@ async def fire_admin_callback(callback: types.CallbackQuery):
     
     if remove_admin_from_db(target_id):
         await callback.answer("✅ Администратор успешно удален!", show_alert=True)
-        
-        # Уведомляем самого уволенного пользователя
         try:
-            await bot.send_message(
-                chat_id=target_id,
-                text="❌ Ваши полномочия администратора тех. поддержки были <b>аннулированы</b>.",
-                parse_mode="HTML"
-            )
+            await bot.send_message(chat_id=target_id, text="❌ Ваши полномочия администратора были <b>аннулированы</b>.", parse_mode="HTML")
         except Exception:
             pass
             
-        # Удаляем сообщение и вызываем панель заново, чтобы список обновился на лету
         try:
             await callback.message.delete()
         except Exception:
             pass
             
-        # Имитируем повторный вызов меню, чтобы Главный админ увидел свежий список
-        await manage_admins_callback(callback, FSMContext)
+        # Правильный вызов без синтаксического сбоя
+        await manage_admins_callback(callback, state)
     else:
-        await callback.answer("⚠️ Не удалось удалить. Возможно, ID не найден.", show_alert=True)
+        await callback.answer("⚠️ Не удалось удалить.", show_alert=True)
 
 
 @dp.callback_query(F.data == "start_add_admin")
@@ -1231,16 +1262,13 @@ async def process_input_admin_id(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data == "view_stats")
 async def view_stats_callback(callback: types.CallbackQuery):
-    """Овнер видит список админов для проверки их логов"""
+    """Исправленный метод чтения статистики из MySQL для Овнера"""
     uid = callback.from_user.id
     if not is_owner(uid):
         await callback.answer("⚠️ Нет прав.", show_alert=True)
         return
 
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT admin_id, closed_count FROM admin_stats")
-        stats = cursor.fetchall()
+    stats = get_admin_stats() # Вызываем готовую MySQL функцию из части 2
 
     if not stats:
         await callback.message.answer("📊 Статистика пуста. Ни один чат еще не сохранен.")
@@ -1251,7 +1279,6 @@ async def view_stats_callback(callback: types.CallbackQuery):
     text = "📊 <b>Выберите администратора для просмотра его закрытых диалогов:</b>\n"
     
     for adm_id, count in stats:
-        # Кнопка ведет на архив чатов конкретного админа
         builder.button(text=f"👤 Админ {adm_id} ({count} чатов)", callback_data=f"arch_adm_{adm_id}")
     
     builder.button(text="⬅️ Назад в меню", callback_data="back_to_panel")
@@ -1263,39 +1290,25 @@ async def view_stats_callback(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("arch_adm_"))
 async def view_admin_archive_callback(callback: types.CallbackQuery):
-    """Показывает полную статистику и список закрытых чатов выбранного админа"""
     adm_id = int(callback.data.split("_")[2])
-    
-    # Подстраиваем формат под вашу запись: "10.08.2026"
     today_date_str = dt.datetime.now().strftime('%d.%m.%Y')
     
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        
-        # 1. Считаем тикеты за ВСЕ ВРЕМЯ (без лимитов)
-        cursor.execute(
-            "SELECT COUNT(*) FROM closed_dialogs_archive WHERE admin_id = ?", 
-            (adm_id,)
-        )
-        total_tickets = cursor.fetchone()[0]
-        
-        # 2. Считаем тикеты ЗА СЕГОДНЯ (Ищем вашу строку формата 10.08.2026 в %H:%M:%S)
-        cursor.execute(
-            "SELECT COUNT(*) FROM closed_dialogs_archive WHERE admin_id = ? AND closed_at LIKE ?", 
-            (adm_id, f"{today_date_str}%")
-        )
-        today_tickets = cursor.fetchone()[0]
-        
-        # 3. Достаем абсолютно ВСЕ закрытые чаты этого админа
-        cursor.execute(
-            "SELECT id, user_id, username, closed_at FROM closed_dialogs_archive WHERE admin_id = ? ORDER BY id DESC",
-            (adm_id,)
-        )
-        all_archive = cursor.fetchall()
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT COUNT(*) FROM closed_dialogs_archive WHERE admin_id = %s", (adm_id,))
+    total_tickets = cursor.fetchone()[0]
+    
+    # Синтаксис MySQL LIKE
+    cursor.execute("SELECT COUNT(*) FROM closed_dialogs_archive WHERE admin_id = %s AND closed_at LIKE %s", (adm_id, f"{today_date_str}%"))
+    today_tickets = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT id, user_id, username, closed_at FROM closed_dialogs_archive WHERE admin_id = %s ORDER BY id DESC", (adm_id,))
+    all_archive = cursor.fetchall()
+    cursor.close()
+    conn.close()
 
     builder = InlineKeyboardBuilder()
-    
-    # Формируем карточку статистики
     text = (
         f"👤 <b>Профиль администратора:</b> <code>{adm_id}</code>\n\n"
         f"📊 <b>Статистика тикетов:</b>\n"
@@ -1305,26 +1318,19 @@ async def view_admin_archive_callback(callback: types.CallbackQuery):
     )
     
     if not all_archive:
-        text += "❌ <i>У этого админа пока нет записанных логов в архиве.</i>\n"
+        text += "❌ <i>У этого админа пока нет записанных логов.</i>\n"
     else:
-        # Чтобы не раздувать кнопки, выводим ВСЕ диалоги списком в тексте
-        for idx, (arch_id, u_id, name, date) in enumerate(all_archive, 1):
-            # В текст пишем абсолютно все диалоги
-            text += f" {idx}. Юзер <code>{u_id}</code> ({name}) — <i>{date}</i>\n"
-            
-            # А кнопки создания файлов делаем ТОЛЬКО для последних 5, чтобы Telegram не выдал ошибку
+        for idx, row in enumerate(all_archive, 1):
+            arch_id, u_id, name, date_str = row
+            text += f" {idx}. Юзер <code>{u_id}</code> ({name}) — <i>{date_str}</i>\n"
             if idx <= 5:
-                builder.button(text=f"📄 Скачать лог: {name}", callback_data=f"getfile_{arch_id}")
+                builder.button(text=f"📄 Лог: {name}", callback_data=f"getfile_{arch_id}")
     
-    text += "\n<i>*Кнопки доступны только для 5 последних диалогов во избежание зависания Telegram.</i>"
-            
-    builder.button(text="⬅️ Назад к списку админов", callback_data="view_stats")
+    builder.button(text="⬅️ Назад", callback_data="view_stats")
     builder.adjust(1)
     
-    # Если текст получился слишком длинным (больше 4096 символов), Telegram его обрежет. 
-    # Защита от слишком длинного списка:
     if len(text) > 4000:
-        text = text[:3900] + "\n\n⚠️ <i>Список слишком длинный и был обрезан...</i>"
+        text = text[:3900] + "\n\n⚠️ <i>Список был обрезан...</i>"
 
     await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
     await callback.answer()
@@ -1333,29 +1339,25 @@ async def view_admin_archive_callback(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("getfile_"))
 async def get_archive_file_callback(callback: types.CallbackQuery):
-    """Отправляет файл .txt с логом переписки"""
     arch_id = int(callback.data.split("_")[1])
     
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT file_path, user_id FROM closed_dialogs_archive WHERE id = ?", (arch_id,))
-        res = cursor.fetchone()
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT file_path, user_id FROM closed_dialogs_archive WHERE id = %s", (arch_id,))
+    res = cursor.fetchone()
+    cursor.close()
+    conn.close()
 
     if not res:
-        await callback.answer("⚠️ Файл лога не найден в базе данных.", show_alert=True)
+        await callback.answer("⚠️ Файл лога не найден.", show_alert=True)
         return
 
     file_path, user_id = res
-    
     if os.path.exists(file_path):
-        await callback.answer("Отправляю файл лога...")
-        # Принудительно отправляем документ в чат овнеру
-        await callback.message.answer_document(
-            document=types.FSInputFile(file_path),
-            caption=f"📋 Полная история переписки с пользователем {user_id}"
-        )
+        await callback.answer("Отправляю лог...")
+        await callback.message.answer_document(document=types.FSInputFile(file_path), caption=f"📋 История чата {user_id}")
     else:
-        await callback.answer("⚠️ Физический файл лога был удален с сервера.", show_alert=True)
+        await callback.answer("⚠️ Физический файл удален с сервера.", show_alert=True)
 
 
 
@@ -1682,7 +1684,7 @@ async def cmd_del_owner(message: types.Message):
 
 
 
-# --- ЕДИНЫЙ ОБРАБОТЧИК ДЛЯ ВСЕХ ТИПОВ СООБЩЕНИЙ И МЕДИА ---
+# --- ЕДИНЫЙ ОБРАБОТЧИК ДЛЯ ВСЕХ ТИПОВ СООБЩЕНИЙ И МЕДИА (ИСПРАВЛЕН ПОД MYSQL И САЙТ) ---
 
 @dp.message()
 async def handle_all_messages(message: types.Message):
@@ -1704,15 +1706,16 @@ async def handle_all_messages(message: types.Message):
             # Пересылаем сообщение пользователю
             await message.copy_to(chat_id=target_user_id)
             
-            # --- СОХРАНЯЕМ ОТВЕТ АДМИНА В ЛОГ ДЛЯ ФАЙЛА ТХТ ---
+            # --- СОХРАНЯЕМ ОТВЕТ АДМИНА В ЛОГ MYSQL ---
             text_to_log = message.text if message.text else f"[{message.content_type.upper()}]"
-            with sqlite3.connect(DB_FILE) as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "INSERT INTO message_logs (user_id, sender, text) VALUES (?, ?, ?)",
-                    (target_user_id, f"Админ ({uid})", text_to_log)
-                )
-                conn.commit()
+            conn = get_mysql_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO message_logs (user_id, sender, text) VALUES (%s, %s, %s)",
+                (target_user_id, f"Админ ({uid})", text_to_log)
+            )
+            cursor.close()
+            conn.close()
                 
         except Exception as e:
             await message.reply(f"❌ Ошибка доставки пользователю: {e}")
@@ -1721,33 +1724,31 @@ async def handle_all_messages(message: types.Message):
     # ЛОГИКА ДЛЯ ОБЫЧНОГО ПОЛЬЗОВАТЕЛЯ
     status = get_dialog_status(uid)
 
-    # 1. Если админ уже зашел в чат и общается ('chatting') — разрешаем слать ВСЁ
+    # 1. Если админ или сайт уже зашли в чат и общаются ('chatting')
     if status == "chatting":
         active_admin_id = get_admin_by_target_user(uid)
+        text_to_log = message.text if message.text else f"[{message.content_type.upper()}]"
+        
+        conn = get_mysql_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO message_logs (user_id, sender, text) VALUES (%s, %s, %s)",
+            (uid, "Пользователь", text_to_log)
+        )
+        cursor.close()
+        conn.close()
+
+        # Если чат перехвачен админом внутри Telegram — дублируем ему на экран
         if active_admin_id:
             try:
-                # 1. Сначала пересылаем сообщение активному админу
                 await message.copy_to(chat_id=active_admin_id)
-                
-                # 2. Сразу после этого сохраняем текст в базу данных для будущего файла .txt
-                text_to_log = message.text if message.text else f"[{message.content_type.upper()}]"
-                with sqlite3.connect(DB_FILE) as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        "INSERT INTO message_logs (user_id, sender, text) VALUES (?, ?, ?)",
-                        (uid, "Пользователь", text_to_log)
-                    )
-                    conn.commit()
-                    
             except Exception:
-                # Если админ заблокировал бота или удалил чат, юзер увидит ошибку
-                await message.answer("Не удалось доставить сообщение администратору.")
+                pass
         return
 
-
-    # 2. Если диалог уже создан, но админ еще не подключился ('open')
+    # 2. Если диалог уже создан, но оператор еще не ответил ('open')
     if status == "open":
-        await message.answer("❌ Ваше обращение уже находится в очереди. Пожалуйста, дождитесь подключения администратора.")
+        await message.answer("❌ Ваше обращение уже находится в очереди. Пожалуйста, дождитесь ответа администратора.")
         return
 
     # 3. Если диалог закрыт ('closed') или новый — открываем обращение
@@ -1757,19 +1758,20 @@ async def handle_all_messages(message: types.Message):
     
     save_or_open_dialog(uid, username, first_name, text_preview)
 
-    # --- ТАКЖЕ ЛОГИРУЕМ САМОЕ ПЕРВОЕ СООБЩЕНИЕ ТИКЕТА ---
+    # Логируем первое сообщение тикета в MySQL
     try:
-        with sqlite3.connect(DB_FILE) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO message_logs (user_id, sender, text) VALUES (?, ?, ?)",
-                (uid, "Пользователь (Первый вопрос)", text_preview)
-            )
-            conn.commit()
-    except Exception:
-        pass
+        conn = get_mysql_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO message_logs (user_id, sender, text) VALUES (%s, %s, %s)",
+            (uid, "Пользователь (Первый вопрос)", text_preview)
+        )
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logging.error(f"Ошибка логирования первого вопроса: {e}")
 
-    # Красивое админ-уведомление в формате HTML с серым фоном <pre>
+    # Красивое админ-уведомление в формате HTML
     admin_notification = (
         f"🔔 <b>Новое обращение в систему!</b>\n"
         f"<pre>"
@@ -1780,41 +1782,37 @@ async def handle_all_messages(message: types.Message):
         f"</pre>\n"
         f"📝 <b>Сообщение:</b>\n"
         f"<i>{text_preview}</i>\n\n"
-        f"👉 Откройте /panel для ответа."
+        f"👉 Откройте /panel или зайдите на веб-сайт для ответа."
     )
 
-    # Извлекаем всех администраторов (и owner, и admin) из таблицы admins
+    # Извлекаем администраторов из MySQL
     admin_ids = []
     try:
-        with sqlite3.connect(DB_FILE) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT user_id FROM admins WHERE role IN ('admin', 'owner')")
-            rows = cursor.fetchall()
-            admin_ids = [row[0] for row in rows]
+        conn = get_mysql_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id FROM admins WHERE role IN ('admin', 'owner')")
+        rows = cursor.fetchall()
+        admin_ids = [row[0] for row in rows]
+        cursor.close()
+        conn.close()
     except Exception as e:
-        logging.error(f"Ошибка получения списка admin_ids из таблицы admins: {e}")
+        logging.error(f"Ошибка получения списка admin_ids: {e}")
 
-    # Фолбек: если база данных недоступна, отправляем хотя бы создателю
     if not admin_ids:
         admin_ids = [OWNER_ID] 
 
-    # Рассылаем уведомление ВСЕМ найденным админам по очереди
+    # Рассылаем уведомление работающим админам
     for admin_id in admin_ids:
-        try:
-            current_id = int(admin_id)
-        except (ValueError, TypeError):
-            continue
-
+        current_id = int(admin_id)
         if is_admin_resting(current_id):
-            logging.info(f"🏖 [ОТДЫХ] Уведомление для админа {current_id} пропущено, так как он на выходном.")
             continue  
             
         try:
             await bot.send_message(chat_id=current_id, text=admin_notification, parse_mode="HTML")
-        except Exception as e:
-            logging.warning(f"Не удалось отправить уведомление админу {current_id}: {e}")
+        except Exception:
+            pass
 
-    # 🔥 ОТПРАВКА НА САЙТ ДЛЯ ГЛАВНОГО АДМИНИСТРАТОРА (Так как тикет новый и еще не взят оператором)
+    # Отправка хука на веб-панель
     web_payload = {
         "status": "new_ticket_queued",
         "user_id": str(uid),
@@ -1823,10 +1821,9 @@ async def handle_all_messages(message: types.Message):
         "message_text": str(text_preview),
         "content_type": str(message.content_type.upper())
     }
-    # Запускаем фоновую отправку на адрес Главного админа
     asyncio.create_task(send_ticket_to_website(OWNER_ID, web_payload))
         
-    await message.answer("🚀 Ваше обращение успешно зарегистрировано в системе. Ожидайте подключения администратора!")
+    await message.answer("🚀 Ваше обращение успешно зарегистрировано. Ожидайте ответа администратора!")
 
 
 # --- БЛОК ЗАПУСКА БОТА ---
