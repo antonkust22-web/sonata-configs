@@ -528,6 +528,62 @@ def is_admin_resting(admin_id: int) -> bool:
 
 
 
+async def auto_penalty_and_reset_checker():
+    """
+    Фоновый таск: раз в 60 секунд проверяет зависшие тикеты.
+    Если оператор взял тикет в работу, но не ответил за 10 минут,
+    система штрафует его и возвращает диалог в общую очередь.
+    """
+    while True:
+        try:
+            conn = get_mysql_connection()
+            cursor = conn.cursor()
+            
+            # Ищем сессии, где последнее сообщение было создано более 10 минут назад, 
+            # а статус диалога всё ещё находится в режиме активной переписки ('chatting')
+            cursor.execute("""
+                SELECT s.admin_id, s.target_user_id, d.first_name 
+                FROM admin_sessions s
+                JOIN dialogs d ON s.target_user_id = d.user_id
+                JOIN message_logs m ON s.target_user_id = m.user_id
+                WHERE d.status = 'chatting'
+                GROUP BY s.target_user_id
+                HAVING MAX(m.timestamp) < NOW() - INTERVAL 10 MINUTE
+            """)
+            expired_tickets = cursor.fetchall()
+            
+            for admin_id, target_user_id, first_name in expired_tickets:
+                # 1. Начисляем штраф нерадивому оператору
+                cursor.execute(
+                    "INSERT INTO admin_penalties (admin_id, reason) VALUES (%s, %s)",
+                    (admin_id, f"Пропуск 10-минутного регламента ответа в тикете пользователя {first_name} (ID: {target_user_id})")
+                )
+                # 2. Сбрасываем привязку оператора к тикету
+                cursor.execute("DELETE FROM admin_sessions WHERE target_user_id = %s", (target_user_id,))
+                # 3. Возвращаем тикет обратно в статус 'open' (в очередь «Ожидают ответа»)
+                cursor.execute("UPDATE dialogs SET status = 'open', last_message = '⏱ Тикет сброшен по таймеру просрочки' WHERE user_id = %s", (target_user_id,))
+                
+                # Уведомляем оператора в Telegram о нарушении
+                try:
+                    await bot.send_message(
+                        chat_id=admin_id,
+                        text=f"⚠️ <b>ВНИМАНИЕ! ШТРАФ!</b>\n Вы пропустили 10-минутный лимит ответа пользователю <b>{first_name}</b>. Тикет возвращен в очередь.",
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
+            
+            conn.commit()
+            cursor.close()
+            conn.close()
+            
+        except Exception as e:
+            logging.error(f"Ошибка в фоновом чекере штрафов: {e}")
+            
+        # Засыпаем на 1 минуту перед следующей проверкой
+        await asyncio.sleep(60)
+
+
 
 
 
@@ -1837,10 +1893,14 @@ async def handle_all_messages(message: types.Message):
 # --- БЛОК ЗАПУСКА БОТА ---
 
 async def main():
-    logging.info("扫 Очищаю сторонние вебхуки и сбрасываю конфликты...")
+    logging.info("🧹 Очищаю сторонние вебхуки и сбрасываю конфликты...")
     await bot.delete_webhook(drop_pending_updates=True)
     
-    logging.info("🚀 Бот успешно перехвачен и запущен в режиме polling!")
+    logging.info("🚀 Бот успешно запущен в режиме polling!")
+    
+    # 🔥 Запускаем чекер штрафов параллельно с работой самого бота
+    asyncio.create_task(auto_penalty_and_reset_checker())
+    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
