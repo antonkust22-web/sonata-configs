@@ -43,20 +43,18 @@ TOKEN = "8778414676:AAHWdX12JWXv5FjKvGb8F83WziNuXh3ZFuI"
 OWNER_ID = 8759913724
 DB_FILE = "bot_database.db"
 
-MYSQL_HOST = "127.0.0.1"  # Сюда впишите IP вашего VPS (например, 78.17.96.45)
+MYSQL_HOST = "78.17.96.45"  # Сюда впишите IP вашего VPS (например, 78.17.96.45)
 MYSQL_USER = "sonata_user"
 MYSQL_PASSWORD = "FFtimeSTEP"    # Пароль от MySQL, заданный на шаге создания базы
 MYSQL_DB = "sonata_support"
 
 def get_mysql_connection():
-    """Создает мгновенное подключение к MySQL через Unix-сокет, игнорируя проблемы с IP"""
     return mysql.connector.connect(
-        unix_socket="/var/run/mysqld/mysqld.sock", # Прямой путь к процессу MySQL в Linux
+        host=MYSQL_HOST,
         user=MYSQL_USER,
         password=MYSQL_PASSWORD,
         database=MYSQL_DB,
         charset='utf8mb4',
-        collation='utf8mb4_unicode_ci',
         autocommit=True
     )
 
