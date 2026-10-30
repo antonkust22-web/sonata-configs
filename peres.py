@@ -43,7 +43,7 @@ TOKEN = "8778414676:AAHWdX12JWXv5FjKvGb8F83WziNuXh3ZFuI"
 OWNER_ID = 8759913724
 DB_FILE = "bot_database.db"
 
-MYSQL_HOST = "78.17.152.36"  # Сюда впишите IP вашего VPS (например, "185.12.34.56")
+MYSQL_HOST = "78.17.96.45"  # Сюда впишите IP вашего VPS (например, "185.12.34.56")
 MYSQL_USER = "sonata_user"
 MYSQL_PASSWORD = "FFtimeSTEP"    # Пароль от MySQL, заданный на шаге создания базы
 MYSQL_DB = "sonata_support"
