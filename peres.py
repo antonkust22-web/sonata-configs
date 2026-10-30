@@ -1739,9 +1739,6 @@ async def cmd_del_owner(message: types.Message):
 
 
 
-
-
-
 # --- ЕДИНЫЙ ОБРАБОТЧИК ДЛЯ ВСЕХ ТИПОВ СООБЩЕНИЙ И МЕДИА (ИСПРАВЛЕН ПОД MYSQL И САЙТ) ---
 
 @dp.message()
@@ -1781,9 +1778,8 @@ async def handle_all_messages(message: types.Message):
             
             if last_user_msg:
                 from datetime import datetime
-                # Время последнего сообщения пользователя
-                last_msg_time = last_user_msg[0] 
-                # Текущее время сервера
+                # Время последнего сообщения пользователя (last_user_msg[0])
+                last_msg_time = last_user_msg[0]
                 current_time = datetime.now()
                 
                 # Считаем разницу в минутах
@@ -1812,7 +1808,6 @@ async def handle_all_messages(message: types.Message):
         except Exception as e:
             await message.reply(f"❌ Ошибка доставки пользователю: {e}")
         return
-
 
     # ЛОГИКА ДЛЯ ОБЫЧНОГО ПОЛЬЗОВАТЕЛЯ
     status = get_dialog_status(uid)
@@ -1843,10 +1838,7 @@ async def handle_all_messages(message: types.Message):
                 await message.copy_to(chat_id=active_admin_id)
             except Exception:
                 pass
-        # Если active_admin_id равен None, значит админ сидит на сайте. 
-        # Ошибку пользователю больше НЕ выводим, сообщение уже успешно ушло на сайт!
         return
-
 
     # 2. Если диалог уже создан, но оператор еще не ответил ('open')
     if status == "open":
@@ -1887,30 +1879,44 @@ async def handle_all_messages(message: types.Message):
         f"👉 Откройте /panel или зайдите на веб-сайт для ответа."
     )
 
-    # Извлекаем администраторов из MySQL
-    admin_ids = []
+    # --- УМНАЯ РАССЫЛКА ОПЕРАТОРАМ ---
+    target_admins = []
     try:
         conn = get_mysql_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT user_id FROM admins WHERE role IN ('admin', 'owner')")
-        rows = cursor.fetchall()
-        admin_ids = [row[0] for row in rows]
+        
+        # Проверяем, закрепил ли уже сайт этот тикет за кем-то конкретным
+        cursor.execute("SELECT admin_id FROM admin_sessions WHERE target_user_id = %s", (uid,))
+        session_res = cursor.fetchone()
+        
+        if session_res and session_res[0]:
+            # Если тикет уже распределен сайтом на конкретного админа, шлем только ему
+            target_admins = [session_res[0]]
+        else:
+            # Если тикет общий, берем всех админов, у которых нет активного выходного
+            cursor.execute(
+                """
+                SELECT a.user_id FROM admins a
+                LEFT JOIN admin_rest r ON a.user_id = r.admin_id
+                WHERE a.role IN ('admin', 'operator', 'owner')
+                  AND (r.is_resting IS NULL OR r.is_resting = 0)
+                """
+            )
+            rows = cursor.fetchall()
+            target_admins = [row[0] for row in rows]
+            
         cursor.close()
         conn.close()
     except Exception as e:
-        logging.error(f"Ошибка получения списка admin_ids: {e}")
+        logging.error(f"Ошибка получения списка распределения: {e}")
 
-    if not admin_ids:
-        admin_ids = [OWNER_ID] 
+    if not target_admins:
+        target_admins = [OWNER_ID] 
 
-    # Рассылаем уведомление работающим админам
-    for admin_id in admin_ids:
-        current_id = int(admin_id)
-        if is_admin_resting(current_id):
-            continue  
-            
+    # Рассылаем уведомление целевым админам
+    for admin_id in target_admins:
         try:
-            await bot.send_message(chat_id=current_id, text=admin_notification, parse_mode="HTML")
+            await bot.send_message(chat_id=int(admin_id), text=admin_notification, parse_mode="HTML")
         except Exception:
             pass
 
@@ -1926,6 +1932,7 @@ async def handle_all_messages(message: types.Message):
     asyncio.create_task(send_ticket_to_website(OWNER_ID, web_payload))
         
     await message.answer("🚀 Ваше обращение успешно зарегистрировано. Ожидайте ответа администратора!")
+
 
 
 # --- БЛОК ЗАПУСКА БОТА ---
