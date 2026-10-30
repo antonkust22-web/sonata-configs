@@ -49,9 +49,9 @@ MYSQL_PASSWORD = "FFtimeSTEP"    # Пароль от MySQL, заданный н�
 MYSQL_DB = "sonata_support"
 
 def get_mysql_connection():
-    """Создает мгновенное подключение к MySQL через Unix-сокет"""
+    """Создает мгновенное подключение к MySQL через Unix-сокет, игнорируя проблемы с IP"""
     return mysql.connector.connect(
-        unix_socket="/var/run/mysqld/mysqld.sock", # Подключаемся напрямую через файл сокета
+        unix_socket="/var/run/mysqld/mysqld.sock", # Прямой путь к процессу MySQL в Linux
         user=MYSQL_USER,
         password=MYSQL_PASSWORD,
         database=MYSQL_DB,
@@ -59,6 +59,8 @@ def get_mysql_connection():
         collation='utf8mb4_unicode_ci',
         autocommit=True
     )
+
+
 
 
 
