@@ -48,11 +48,10 @@ MYSQL_USER = "sonata_user"
 MYSQL_PASSWORD = "FFtimeSTEP"    # Пароль от MySQL, заданный на шаге создания базы
 MYSQL_DB = "sonata_support"
 
-# Функция подключения ОБЯЗАТЕЛЬНО должна быть объявлена первой в коде!
 def get_mysql_connection():
-    """Создает мгновенное сетевое подключение к MySQL на вашем VPS"""
+    """Создает мгновенное подключение к MySQL через Unix-сокет"""
     return mysql.connector.connect(
-        host=MYSQL_HOST,
+        unix_socket="/var/run/mysqld/mysqld.sock", # Подключаемся напрямую через файл сокета
         user=MYSQL_USER,
         password=MYSQL_PASSWORD,
         database=MYSQL_DB,
@@ -60,6 +59,7 @@ def get_mysql_connection():
         collation='utf8mb4_unicode_ci',
         autocommit=True
     )
+
 
 
 
