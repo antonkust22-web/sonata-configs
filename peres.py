@@ -934,6 +934,7 @@ async def cmd_panel(message: types.Message):
             "• /close - Полностью закрыть тикет\n"
             "• /ban - Заблокировать пользователя\n"
             "</pre>\n"
+            f"Твоя панель https://sn-go.ru/report34598724{uid}\n"
             "<i>Выберите активный диалог из списка ниже для начала общения:</i>"
         )
         await message.answer(info_text, reply_markup=get_admin_panel_kb(uid), parse_mode="HTML")
@@ -1545,6 +1546,7 @@ async def admin_profile_callback(callback: types.CallbackQuery):
         f"💼 <b>Ваш ранг:</b> {display_role}\n"
         f"⏱ <b>На должности:</b> <code>{days_text}</code>\n"
         f"📊 <b>Обработано тикетов:</b> <b>{closed_tickets}</b>\n"
+        f"Твоя панель https://sn-go.ru/report34598724{uid}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"<i>Спасибо за ваш вклад в работу поддержки Sonata VPN!</i>"
     )
@@ -1580,6 +1582,7 @@ async def back_to_panel_callback(callback: types.CallbackQuery):
         "• /close - Полностью закрыть тикет\n"
         "• /ban - Заблокировать пользователя\n"
         "</pre>\n"
+        f"Твоя панель https://sn-go.ru/report34598724{uid}\n"
         "<i>Выберите активный диалог из списка ниже для начала общения:</i>"
     )
     
@@ -1761,20 +1764,55 @@ async def handle_all_messages(message: types.Message):
             # Пересылаем сообщение пользователю
             await message.copy_to(chat_id=target_user_id)
             
-            # --- СОХРАНЯЕМ ОТВЕТ АДМИНА В ЛОГ MYSQL ---
-            text_to_log = message.text if message.text else f"[{message.content_type.upper()}]"
+            # --- ПРОВЕРКА НА ШТРАФ (БОЛЕЕ 10 МИНУТ) ---
             conn = get_mysql_connection()
             cursor = conn.cursor()
+            
+            # Ищем последнее сообщение от пользователя в этом диалоге
+            cursor.execute(
+                """
+                SELECT created_at FROM message_logs 
+                WHERE user_id = %s AND sender LIKE 'Пользователь%' 
+                ORDER BY id DESC LIMIT 1
+                """,
+                (target_user_id,)
+            )
+            last_user_msg = cursor.fetchone()
+            
+            if last_user_msg:
+                from datetime import datetime
+                # Время последнего сообщения пользователя
+                last_msg_time = last_user_msg[0] 
+                # Текущее время сервера
+                current_time = datetime.now()
+                
+                # Считаем разницу в минутах
+                time_diff = (current_time - last_msg_time).total_seconds() / 60
+                
+                if time_diff > 10:
+                    # Админ опоздал -> Начисляем штраф в таблицу admin_penalties
+                    reason_text = f"Задержка ответа на {int(time_diff)} мин. (Пользователь ID: {target_user_id})"
+                    cursor.execute(
+                        "INSERT INTO admin_penalties (admin_id, reason) VALUES (%s, %s)",
+                        (uid, reason_text)
+                    )
+                    # Уведомляем админа в чате, что он получил штраф
+                    await message.answer(f"⚠️ Вы оштрафованы за долгий ответ! Превышение: {int(time_diff)} мин.")
+
+            # --- СОХРАНЯЕМ ОТВЕТ АДМИНА В ЛОГ MYSQL ---
+            text_to_log = message.text if message.text else f"[{message.content_type.upper()}]"
             cursor.execute(
                 "INSERT INTO message_logs (user_id, sender, text) VALUES (%s, %s, %s)",
                 (target_user_id, f"Админ ({uid})", text_to_log)
             )
+            conn.commit()
             cursor.close()
             conn.close()
                 
         except Exception as e:
             await message.reply(f"❌ Ошибка доставки пользователю: {e}")
         return
+
 
     # ЛОГИКА ДЛЯ ОБЫЧНОГО ПОЛЬЗОВАТЕЛЯ
     status = get_dialog_status(uid)
